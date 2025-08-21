@@ -56,27 +56,34 @@ int main(int argc, char **argv) {
   std::cout << "Client connected\n";
 
   char buff[1024] = {0};
-  ssize_t bytes_read = read(client_fd, buff, sizeof(buff) - 1);
+  ssize_t bytes_read;
+  while(true) {
+    bytes_read = read(client_fd, buff, sizeof(buff) - 1);
 
-  if(bytes_read > 0) {
-    buff[bytes_read] = '\0';
-    std::string cmd(buff);
-    std::cout << "Received: " << cmd;
+    if(bytes_read > 0) {
+      buff[bytes_read] = '\0';
+      std::string cmd(buff);
+      std::cout << "Received: " << cmd;
 
-    if (cmd.find("PING") != std::string::npos) {
-      const char* pong_response = "+PONG\r\n";
-      ssize_t bytes_sent = send(client_fd, pong_response, strlen(pong_response), 0);
-      if (bytes_sent < 0) {
-        std::cerr << "Failed to send PONG response\n";
+      if (cmd.find("PING") != std::string::npos) {
+        const char* pong_response = "+PONG\r\n";
+        ssize_t bytes_sent = send(client_fd, pong_response, strlen(pong_response), 0);
+        if (bytes_sent < 0) {
+          std::cerr << "Failed to send PONG response\n";
+        } else {
+          std::cout << "Sent response: +PONG\\r\\n\n";
+        }
       } else {
-        std::cout << "Sent response: +PONG\\r\\n\n";
+        const char* err_response = "-ERR unknown command\r\n";
+        send(client_fd, err_response, strlen(err_response), 0);
       }
+    } else if (bytes_read == 0) {
+      std::cout << "Client disconnected\n";
+      break;
     } else {
-      const char* err_response = "-ERR unknown command\r\n";
-      send(client_fd, err_response, strlen(err_response), 0);
+      std::cerr << "Failed to read from client or no data received\n";
+      break;
     }
-  } else {
-    std::cerr << "Failed to read from client or no data received\n";
   }
 
   close(client_fd);
