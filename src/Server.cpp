@@ -80,70 +80,51 @@ int main(int argc, char **argv) {
           continue;
         } else {
           buffer[bytes_read] = '\0';
-          std::string cmd(buffer);
-          std::cout << "Bytes read from FD " << poll_fds[i].fd << ": " << cmd;
 
-          if(cmd.find("PING") != std::string::npos) {
-            const char* pong = "+PONG\r\n";
-            send(poll_fds[i].fd, pong, strlen(pong), 0);
+          char* p = buffer;
+          std::string cmd(buffer);
+
+          if(*p != '*') {
+            if(cmd.find("PING") != std::string::npos) {
+              const char* pong = "+PONG\r\n";
+              send(poll_fds[i].fd, pong, strlen(pong), 0);
+            } else {
+              const char* err = "-ERR unknown command\r\n";
+              send(poll_fds[i].fd, err, strlen(err), 0);
+            }
           } else {
-            const char* err = "-ERR unknown command\r\n";
-            send(poll_fds[i].fd, err, strlen(err), 0);
+            int idx = cmd.find("ECHO");
+            if (idx != std::string::npos) {
+                int arg_pos = cmd.find("\r\n", idx);
+                if (arg_pos != std::string::npos) {
+                    arg_pos += 2;
+                    if (cmd[arg_pos] == '$') {
+                        int len_start = arg_pos + 1;
+                        int len_end = cmd.find("\r\n", len_start);
+                        if (len_end != std::string::npos) {
+                            int len = std::stoi(cmd.substr(len_start, len_end - len_start));
+                            int data_start = len_end + 2;
+                            std::string message = cmd.substr(data_start, len);
+
+                            std::string res = "$" + std::to_string(message.size()) + "\r\n" + message + "\r\n";
+                            send(poll_fds[i].fd, res.c_str(), res.size(), 0);
+                        }
+                    }
+                }
+            } else {
+              const char* err = "-ERR unknown command\r\n";
+              send(poll_fds[i].fd, err, strlen(err), 0);
+            }
+            
+           } 
           }
         }
+        i++;
       }
-      i++;
-    }
-  }
 
+    }
   for(auto &pfd : poll_fds) close(pfd.fd);
   close(server_fd);
   
-  /*struct sockaddr_in client_addr;
-  int client_addr_len = sizeof(client_addr);
-  std::cout << "Waiting for a client to connect...\n";
-
-  // You can use print statements as follows for debugging, they'll be visible when running tests.
-  std::cout << "Logs from your program will appear here!\n";
-
-  // Uncomment this block to pass the first stage
-  // 
-  int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
-  std::cout << "Client connected\n";
-
-  char buff[1024] = {0};
-  ssize_t bytes_read;
-  while(true) {
-    bytes_read = read(client_fd, buff, sizeof(buff) - 1);
-
-    if(bytes_read > 0) {
-      buff[bytes_read] = '\0';
-      std::string cmd(buff);
-      std::cout << "Received: " << cmd;
-
-      if (cmd.find("PING") != std::string::npos) {
-        const char* pong_response = "+PONG\r\n";
-        ssize_t bytes_sent = send(client_fd, pong_response, strlen(pong_response), 0);
-        if (bytes_sent < 0) {
-          std::cerr << "Failed to send PONG response\n";
-        } else {
-          std::cout << "Sent response: +PONG\\r\\n\n";
-        }
-      } else {
-        const char* err_response = "-ERR unknown command\r\n";
-        send(client_fd, err_response, strlen(err_response), 0);
-      }
-    } else if (bytes_read == 0) {
-      std::cout << "Client disconnected\n";
-      break;
-    } else {
-      std::cerr << "Failed to read from client or no data received\n";
-      break;
-    }
-  }
-
-  close(client_fd);
-  close(server_fd);
-  */
-  return 0;
+   return 0;
 }
