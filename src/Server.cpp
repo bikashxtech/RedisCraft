@@ -93,28 +93,34 @@ int main(int argc, char **argv) {
               send(poll_fds[i].fd, err, strlen(err), 0);
             }
           } else {
-            int idx = cmd.find("ECHO");
-            if (idx != std::string::npos) {
-                int arg_pos = cmd.find("\r\n", idx);
-                if (arg_pos != std::string::npos) {
-                    arg_pos += 2;
-                    if (cmd[arg_pos] == '$') {
-                        int len_start = arg_pos + 1;
-                        int len_end = cmd.find("\r\n", len_start);
-                        if (len_end != std::string::npos) {
-                            int len = std::stoi(cmd.substr(len_start, len_end - len_start));
-                            int data_start = len_end + 2;
-                            std::string message = cmd.substr(data_start, len);
+            if (cmd.find("PING") != std::string::npos) {
+              const char* pong = "+PONG\r\n";
+              send(poll_fds[i].fd, pong, strlen(pong), 0);
+            } else {
+                int idx = cmd.find("ECHO");
+                if (idx != std::string::npos) {
+                    int arg_pos = cmd.find("\r\n", idx);
+                    if (arg_pos != std::string::npos) {
+                        arg_pos += 2;
+                        if (cmd[arg_pos] == '$') {
+                            int len_start = arg_pos + 1;
+                            int len_end = cmd.find("\r\n", len_start);
+                            if (len_end != std::string::npos) {
+                                int len = std::stoi(cmd.substr(len_start, len_end - len_start));
+                                int data_start = len_end + 2;
+                                std::string message = cmd.substr(data_start, len);
 
-                            std::string res = "$" + std::to_string(message.size()) + "\r\n" + message + "\r\n";
-                            send(poll_fds[i].fd, res.c_str(), res.size(), 0);
+                                std::string res = "$" + std::to_string(message.size()) + "\r\n" + message + "\r\n";
+                                send(poll_fds[i].fd, res.c_str(), res.size(), 0);
+                            }
                         }
                     }
+                } else {
+                  const char* err = "-ERR unknown command\r\n";
+                  send(poll_fds[i].fd, err, strlen(err), 0);
                 }
-            } else {
-              const char* err = "-ERR unknown command\r\n";
-              send(poll_fds[i].fd, err, strlen(err), 0);
             }
+            
             
            } 
           }
