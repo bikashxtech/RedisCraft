@@ -97,7 +97,7 @@ std::string handle_set(const char* resp) {
       return "-ERR Invalid SET Command\r\n";
   }
 
-  std::transform(parts.begin(), parts.end(), parts.begin(), ::tolower);
+  std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
   if(parts[0] != "set") {
       return "-ERR Invalid SET Command\r\n";
   }
@@ -138,7 +138,7 @@ std::string handle_get(const char* resp) {
       return "-ERR Invalid GET command\r\n";
   }
 
-  std::transform(parts.begin(), parts.end(), parts.begin(), ::tolower);
+  std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
   if(parts[0] != "get") {
       return "-ERR Invalid GET command\r\n";
   }
