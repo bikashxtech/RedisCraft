@@ -9,7 +9,86 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <vector>
+#include <unordered_map>
 #include <netdb.h>
+
+std::unordered_map<std::string,std::string> redis_storage;
+
+std::string parse_bulk_string(const char* resp, size_t& pos) {
+    if(resp[pos] != '$') return "";
+
+    pos++;
+    int length = 0;
+
+    while (resp[pos] >= '0' && resp[pos] <= '9') {
+        length = length * 10 + (resp[pos++] - '0');
+    }
+
+    if (resp[pos] != '\r' || resp[pos + 1] != '\n') return "";
+
+    pos += 2;
+
+    std::string result(&resp[pos], length);
+    pos += length;
+
+    if (resp[pos] != '\r' || resp[pos + 1] != '\n') return "";
+    pos += 2;
+
+    return result;
+}
+
+std::vector<std::string> parse_resp_array(const char* resp) {
+    size_t pos = 0;
+    if (resp[pos] != '*') return {};
+    pos++;
+
+    int count = 0;
+    while (resp[pos] >= '0' && resp[pos] <= '9') {
+        count = count * 10 + (resp[pos++] - '0');
+    }
+
+    if (resp[pos] != '\r' || resp[pos + 1] != '\n') return {};
+    pos += 2;
+
+    std::vector<std::string> parts;
+    for(int i = 0; i < count; i++) {
+        std::string bulk = parse_bulk_string(resp, pos);
+        if (bulk.empty() && bulk != "") return {};
+        parts.push_back(bulk);
+    }
+    return parts;
+}
+
+std::string handle_set(const char* resp) {
+    std::string res = "";
+    auto parts = parse_resp_array(resp);
+    if (parts.size() != 3 || parts[0] != "SET") {
+        res = "-ERR Invalid SET Command\r\n";
+        return res;
+    }
+
+    redis_storage[parts[1]] = parts[2];
+    res = "+OK\r\n";
+    return res;
+}
+
+std::string handle_get(const char* resp) {
+    std::string res = "";
+    auto parts = parse_resp_array(resp);
+    if (parts.size() != 2 || parts[0] != "GET") {
+        res = "-ERR Invalid GET Command\r\n";
+        return res;
+    }
+
+    auto it = redis_storage.find(parts[1]);
+    if (it == redis_storage.end()) {
+        res = "$-1\r\n";
+    } else {
+        const std::string& val = it -> second;
+        res = "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n"; 
+    }
+    return res;
+}
 
 int main(int argc, char **argv) {
   // Flush after every std::cout / std::cerr
@@ -116,8 +195,17 @@ int main(int argc, char **argv) {
                         }
                     }
                 } else {
-                  const char* err = "-ERR unknown command\r\n";
-                  send(poll_fds[i].fd, err, strlen(err), 0);
+                  if (cmd.find("SET") != std::string::npos) {
+                      const char* res =  handle_set(p).c_str();
+                      send(poll_fds[i].fd, res, strlen(res), 0);
+                  } else if(cmd.find("GET") != std::string::npos) {
+                      const char* res = handle_get(p).c_str();
+                      send(poll_fds[i].fd, res, strlen(res), 0);
+                  }
+                   else {
+                      const char* err = "-ERR Invalid Unknown Command";
+                      send(poll_fds[i].fd, err, strlen(err), 0);
+                   }
                 }
             }
             
