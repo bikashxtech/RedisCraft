@@ -9,10 +9,42 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <vector>
+#include <algorithm>
+#include <chrono>
+#include <thread>
+#include <mutex>
 #include <unordered_map>
 #include <netdb.h>
 
-std::unordered_map<std::string,std::string> redis_storage;
+using Clock = std::chrono::steady_clock;
+using TimePoint = std::chrono::time_point<Clock>;
+
+struct ValueWithExpiry {
+    std::string value;
+    TimePoint expiry;
+};
+
+std::unordered_map<std::string, ValueWithExpiry> redis_storage;
+std::mutex storage_mutex;
+
+void cleanup_expired_keys() {
+    std::lock_guard<std::mutex> lock(storage_mutex);
+    auto now = Clock::now();
+    for (auto it = redis_storage.begin(); it != redis_storage.end(); ) {
+        if (it -> second.expiry != TimePoint::min() && it->second.expiry <= now) {
+            it = redis_storage.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void expiry_monitor() {
+    while(true) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        cleanup_expired_keys();
+    }
+}
 
 std::string parse_bulk_string(const char* resp, size_t& pos) {
     if(resp[pos] != '$') return "";
@@ -60,38 +92,81 @@ std::vector<std::string> parse_resp_array(const char* resp) {
 }
 
 std::string handle_set(const char* resp) {
-    std::string res = "";
-    auto parts = parse_resp_array(resp);
-    if (parts.size() != 3 || parts[0] != "SET") {
-        res = "-ERR Invalid SET Command\r\n";
-        return res;
-    }
+  auto parts = parse_resp_array(resp);
+  if(parts.size() < 3) {
+      return "-ERR Invalid SET Command\r\n";
+  }
 
-    redis_storage[parts[1]] = parts[2];
-    res = "+OK\r\n";
-    return res;
+  std::transform(parts.begin(), parts.end(), parts.begin(), ::tolower);
+  if(parts[0] != "set") {
+      return "-ERR Invalid SET Command\r\n";
+  }
+
+  std::string key = parts[1];
+  std::string value = parts[2];
+  TimePoint expiry = TimePoint::min();
+
+  // Handle optional PX argument
+  if(parts.size() == 5) {
+      std::string option = parts[3];
+      std::transform(option.begin(), option.end(), option.begin(), ::tolower);
+      if(option == "px") {
+          try {
+              int ms = std::stoi(parts[4]);
+              expiry = Clock::now() + std::chrono::milliseconds(ms);
+          } catch(...) {
+              return "-ERR Invalid PX value\r\n";
+          }
+      } else {
+          return "-ERR Syntax error\r\n";
+      }
+  } else if(parts.size() != 3) {
+      return "-ERR Syntax error\r\n";
+  }
+
+  {
+      std::lock_guard<std::mutex> lock(storage_mutex);
+      redis_storage[key] = {value, expiry};
+  }
+
+  return "+OK\r\n";
 }
 
 std::string handle_get(const char* resp) {
-    std::string res = "";
-    auto parts = parse_resp_array(resp);
-    if (parts.size() != 2 || parts[0] != "GET") {
-        res = "-ERR Invalid GET Command\r\n";
-        return res;
-    }
+  auto parts = parse_resp_array(resp);
+  if(parts.size() != 2) {
+      return "-ERR Invalid GET command\r\n";
+  }
 
-    auto it = redis_storage.find(parts[1]);
-    if (it == redis_storage.end()) {
-        res = "$-1\r\n";
-    } else {
-        const std::string& val = it -> second;
-        res = "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n"; 
-    }
-    return res;
+  std::transform(parts.begin(), parts.end(), parts.begin(), ::tolower);
+  if(parts[0] != "get") {
+      return "-ERR Invalid GET command\r\n";
+  }
+  
+  std::string key = parts[1];
+  ValueWithExpiry val;
+  
+  {
+      std::lock_guard<std::mutex> lock(storage_mutex);
+      auto it = redis_storage.find(key);
+      if(it == redis_storage.end()) {
+          return "$-1\r\n";
+      }
+      val = it->second;
+  }
+
+  if(val.expiry != TimePoint::min() && Clock::now() >= val.expiry) {
+      std::lock_guard<std::mutex> lock(storage_mutex);
+      redis_storage.erase(key);
+      return "$-1\r\n";
+  }
+
+  return "$" + std::to_string(val.value.size()) + "\r\n" + val.value + "\r\n";
 }
 
 int main(int argc, char **argv) {
   // Flush after every std::cout / std::cerr
+  std::thread(expiry_monitor).detach();
   std::cout << std::unitbuf;
   std::cerr << std::unitbuf;
   
