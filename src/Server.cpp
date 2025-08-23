@@ -187,6 +187,27 @@ std::string handle_RPUSH(const char* resp) {
     return ":" + std::to_string(lst.size()) + "\r\n";
 }
 
+std::string handle_LPUSH(const char* resp) {
+  auto parts = parse_resp_array(resp);
+  if(parts.size() < 3) {
+      return "-ERR Invalid RPUSH Command\r\n";
+  }
+
+  std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
+
+  if (parts[0] != "rpush") {
+      return "-ERR Invalid RPUSH Command\r\n";
+  }
+
+  auto listName = parts[1];
+
+  std::lock_guard<std::mutex> lock(storage_mutex);
+  auto& lst = lists[listName];
+  
+  for (size_t i = 2; i < parts.size(); ++i) lst.insert(lst.begin(), parts[i]);
+  return ":" + std::to_string(lst.size()) + "\r\n";
+}
+
 std::string handle_LRANGE(const char* resp) {
   auto parts = parse_resp_array(resp);
   if (parts.size() != 4) {
@@ -354,6 +375,9 @@ int main(int argc, char **argv) {
                       send(poll_fds[i].fd, res.c_str(), res.size(), 0);
                   } else if(cmd.find("LRANGE") != std::string::npos) {
                       std::string res = handle_LRANGE(p);
+                      send(poll_fds[i].fd, res.c_str(), res.size(), 0);
+                  } else if(cmd.find("LPUSH") != std::string::npos) {
+                      std::string res = handle_LPUSH(p);
                       send(poll_fds[i].fd, res.c_str(), res.size(), 0);
                   }
                    else {
