@@ -86,7 +86,7 @@ std::vector<std::string> parse_resp_array(const char* resp) {
     std::vector<std::string> parts;
     for(int i = 0; i < count; i++) {
         std::string bulk = parse_bulk_string(resp, pos);
-        if (bulk.empty() && bulk != "") return {};
+        if (bulk.empty()) return {};
         parts.push_back(bulk);
     }
     return parts;
@@ -139,7 +139,8 @@ std::string handle_get(const char* resp) {
       return "-ERR Invalid GET command\r\n";
   }
 
-  std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
+  std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(),
+  [](unsigned char c){ return std::tolower(c); });
   if(parts[0] != "get") {
       return "-ERR Invalid GET command\r\n";
   }
@@ -168,29 +169,22 @@ std::string handle_get(const char* resp) {
 std::string handle_RPUSH(const char* resp) {
     auto parts = parse_resp_array(resp);
     if(parts.size() < 3) {
-        return "-ERR Invalid RPUSH Command";
+        return "-ERR Invalid RPUSH Command\r\n";
     }
 
     std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
 
     if (parts[0] != "rpush") {
-        return "-ERR Invalid RPUSH Command";
+        return "-ERR Invalid RPUSH Command\r\n";
     }
 
     auto listName = parts[1];
+
+    std::lock_guard<std::mutex> lock(storage_mutex);
+    auto& lst = lists[listName];
     
-    if(lists.find(listName) == lists.end()) {
-        std::vector<std::string> list;
-        for(int i = 2; i < parts.size() ;i++) {
-            list.push_back(parts[i]);
-        }
-        lists[listName] = list;
-        return ":" + std::to_string(list.size()) + "\r\n";
-    }
-    for(int i = 2; i < parts.size() ;i++) {
-        lists[listName].push_back(parts[i]);
-    }
-    return ":" + std::to_string(lists[listName].size()) + "\r\n";
+    for (size_t i = 2; i < parts.size(); ++i) lst.push_back(parts[i]);
+    return ":" + std::to_string(lst.size()) + "\r\n";
 }
 
 std::string handle_LRANGE(const char* resp) {
@@ -199,58 +193,41 @@ std::string handle_LRANGE(const char* resp) {
       return "-ERR Invalid LRANGE Command\r\n";
   }
 
-  std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
+  std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(),
+  [](unsigned char c){ return std::tolower(c); });
   if (parts[0] != "lrange") {
       return "-ERR Invalid LRANGE Command\r\n";
   }
 
   const std::string& listName = parts[1];
 
+  std::vector<std::string> snapshot;
   {
       std::lock_guard<std::mutex> lock(storage_mutex);
-      if (lists.find(listName) == lists.end()) {
-          return "*0\r\n";  // Empty array for non-existing list
-      }
+      auto it = lists.find(listName);
+      if (it == lists.end()) return "*0\r\n";
+      snapshot = it -> second;
   }
 
-  int list_size;
-  {
-      std::lock_guard<std::mutex> lock(storage_mutex);
-      list_size = static_cast<int>(lists[listName].size());
-  }
-
+  int n = static_cast<int>(snapshot.size());
   int start, end;
 
-  try {
+  try{
       start = std::stoi(parts[2]);
       end = std::stoi(parts[3]);
   } catch (...) {
       return "-ERR Invalid LRANGE indices\r\n";
   }
-
-  // Handle negative indices
-  if (start < 0) start = list_size + start;
-  if (end < 0) end = list_size + end;
   
-  // Clamp bounds
-  if (start < 0) start = 0;
-  if (end < 0) end = 0;
-  if (start >= list_size || start > end) {
-      return "*0\r\n";
-  }
-  if (end >= list_size) {
-      end = list_size - 1;
-  }
+  if (end >= n) end = n - 1;
 
-  int range_size = end - start + 1;
-  std::string res = "*" + std::to_string(range_size) + "\r\n";
+  if (start > end || start >= n) return "*0\r\n";
 
-  {
-      std::lock_guard<std::mutex> lock(storage_mutex);
-      for (int i = start; i <= end; ++i) {
-          const std::string& elem = lists[listName][i];
-          res += "$" + std::to_string(elem.size()) + "\r\n" + elem + "\r\n";
-      }
+  std::string res = "*" + std::to_string(end - start + 1) + "\r\n";
+
+  for (int i = start; i <= end; i++) {
+      const std::string& elem = snapshot[i];
+      res += "$" + std::to_string(elem.size()) + "\r\n" + elem + "\r\n";
   }
 
   return res;
@@ -369,11 +346,11 @@ int main(int argc, char **argv) {
                       const char* res = handle_get(p).c_str();
                       send(poll_fds[i].fd, res, strlen(res), 0);
                   } else if(cmd.find("RPUSH") != std::string::npos) {
-                      const char* res = handle_RPUSH(p).c_str();
-                      send(poll_fds[i].fd, res, strlen(res), 0);
+                      std::string res = handle_RPUSH(p);
+                      send(poll_fds[i].fd, res.c_str(), res.size(), 0);
                   } else if(cmd.find("LRANGE") != std::string::npos) {
-                      const char* res = handle_LRANGE(p).c_str();
-                      send(poll_fds[i].fd, res, strlen(res), 0);
+                      std::string res = handle_LRANGE(p);
+                      send(poll_fds[i].fd, res.c_str(), res.size(), 0);
                   }
                    else {
                       const char* err = "-ERR Invalid Unknown Command";
