@@ -225,9 +225,9 @@ std::string handle_LRANGE(const char* resp) {
     std::string res = "*" + std::to_string(range_size) + "\r\n";
 
     for (int i = start; i <= end; ++i) {
-        res += "$" + std::to_string(lists[parts[1]][i].length()) + "\r\n" + lists[parts[1]][i] + "\r\n";
+        const std::string& elem = lists[parts[1]][i];
+        res += "$" + std::to_string(elem.size()) + "\r\n" + elem + "\r\n";
     }
-
     return res;
 }
 
