@@ -264,9 +264,7 @@ std::string handle_LLEN(const char* resp) {
         return "-ERR Invalid LLEN Command\r\n";
     }
 
-    std::transform(parts[0].begin(),parts[0].end(), parts[0].begin(), [](unsigned char& c){
-        return ::tolower(c);
-    });
+    std::transform(parts[0].begin(),parts[0].end(), parts[0].begin(), ::tolower);
 
     if(parts[0] != "llen") {
         return "-ERR Invalid LLEN Command\r\n";
