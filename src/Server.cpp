@@ -190,13 +190,13 @@ std::string handle_RPUSH(const char* resp) {
 std::string handle_LPUSH(const char* resp) {
   auto parts = parse_resp_array(resp);
   if(parts.size() < 3) {
-      return "-ERR Invalid RPUSH Command\r\n";
+      return "-ERR Invalid LPUSH Command\r\n";
   }
 
   std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
 
-  if (parts[0] != "rpush") {
-      return "-ERR Invalid RPUSH Command\r\n";
+  if (parts[0] != "lpush") {
+      return "-ERR Invalid LPUSH Command\r\n";
   }
 
   auto listName = parts[1];
