@@ -288,6 +288,12 @@ std::string handle_LPOP(const char* resp) {
         return "-ERR Invalid LPOP Command\r\n";
     }
 
+    bool args = false;
+
+    if(parts.size() == 3) {
+        args = true;
+    }
+
     std::lock_guard<std::mutex> lock(storage_mutex);
 
     auto it = lists.find(parts[1]);
@@ -296,6 +302,26 @@ std::string handle_LPOP(const char* resp) {
         return "$-1\r\n";
     }
 
+    if (args) {
+      try{
+        int numPop = std::stoi(parts[2]);
+        if (numPop > it -> second.size()) {
+            numPop = it -> second.size();
+        }
+
+        std::string res = "*" + std::to_string(numPop);
+
+        for(int i = 0; i < numPop; i++) {
+            std::string popped_element = it -> second[0];
+            it -> second.erase(it -> second.begin());
+            res += "$" + std::to_string(popped_element.size()) + "\r\n" + popped_element + "\r\n"; 
+        }
+        
+        return res;
+      } catch (...) {
+          return "-ERR Invalid Argument\r\n";
+      }
+    }
     std::string popped_element = it -> second[0];
     it -> second.erase(it -> second.begin());
 
