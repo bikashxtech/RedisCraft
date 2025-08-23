@@ -258,6 +258,27 @@ std::string handle_LRANGE(const char* resp) {
   return res;
 }
 
+std::string handle_LLEN(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if(parts.size() != 2) {
+        return "-ERR Invalid LLEN Command\r\n";
+    }
+
+    std::transform(parts[0].begin(),parts[0].end(), parts[0].begin(), [](unsigned char& c){
+        return ::tolower(c);
+    });
+
+    if(parts[0] != "llen") {
+        return "-ERR Invalid LLEN Command\r\n";
+    }
+    std::lock_guard<std::mutex> lock(storage_mutex);
+    auto it = lists.find(parts[1]);
+
+    if(it == lists.end()) return ":0\r\n";
+
+    return ":" + std::to_string(it -> second.size()) + "\r\n";
+}
+
 int main(int argc, char **argv) {
   // Flush after every std::cout / std::cerr
   std::thread(expiry_monitor).detach();
@@ -379,11 +400,13 @@ int main(int argc, char **argv) {
                   } else if(cmd.find("LPUSH") != std::string::npos) {
                       std::string res = handle_LPUSH(p);
                       send(poll_fds[i].fd, res.c_str(), res.size(), 0);
-                  }
-                   else {
+                  } else if(cmd.find("LLEN") != std::string::npos) {
+                      std::string res = handle_LLEN(p);
+                      send(poll_fds[i].fd, res.c_str(), res.size(), 0);
+                  } else {
                       const char* err = "-ERR Invalid Unknown Command";
                       send(poll_fds[i].fd, err, strlen(err), 0);
-                   }
+                  }
                 }
             }
             
