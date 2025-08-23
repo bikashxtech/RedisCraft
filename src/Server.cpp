@@ -277,6 +277,31 @@ std::string handle_LLEN(const char* resp) {
     return ":" + std::to_string(it -> second.size()) + "\r\n";
 }
 
+std::string handle_LPOP(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if(parts.size() < 2) {
+        return "-ERR Invalid LPOP Command\r\n";
+    }
+
+    std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
+    if(parts[0] != "lpop") {
+        return "-ERR Invalid LPOP Command\r\n";
+    }
+
+    std::lock_guard<std::mutex> lock(storage_mutex);
+
+    auto it = lists.find(parts[1]);
+
+    if (it == lists.end()) {
+        return "$-1\r\n";
+    }
+
+    std::string popped_element = it -> second[0];
+    it -> second.erase(it -> second.begin());
+
+    return "$" + std::to_string(popped_element.size()) + "\r\n" + popped_element + "\r\n";
+}
+
 int main(int argc, char **argv) {
   // Flush after every std::cout / std::cerr
   std::thread(expiry_monitor).detach();
@@ -400,6 +425,9 @@ int main(int argc, char **argv) {
                       send(poll_fds[i].fd, res.c_str(), res.size(), 0);
                   } else if(cmd.find("LLEN") != std::string::npos) {
                       std::string res = handle_LLEN(p);
+                      send(poll_fds[i].fd, res.c_str(), res.size(), 0);
+                  } else if(cmd.find("LPOP") != std::string::npos) {
+                      std::string res = handle_LPOP(p);
                       send(poll_fds[i].fd, res.c_str(), res.size(), 0);
                   } else {
                       const char* err = "-ERR Invalid Unknown Command";
