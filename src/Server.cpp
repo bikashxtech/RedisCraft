@@ -194,41 +194,63 @@ std::string handle_RPUSH(const char* resp) {
 }
 
 std::string handle_LRANGE(const char* resp) {
-    auto parts = parse_resp_array(resp);
-    if (parts.size() < 4) {
-        return "-ERR Invalid LRANGE Command";
-    }
+  auto parts = parse_resp_array(resp);
+  if (parts.size() != 4) {
+      return "-ERR Invalid LRANGE Command\r\n";
+  }
 
-    std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
+  std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
+  if (parts[0] != "lrange") {
+      return "-ERR Invalid LRANGE Command\r\n";
+  }
 
-    if(parts[0] != "lrange") {
-        return "-ERR Invalid LRANGE Command";
-    }
+  const std::string& listName = parts[1];
 
-    if (lists.find(parts[1]) == lists.end()) {
-        return "*0\r\n";
-    }
+  {
+      if (lists.find(listName) == lists.end()) {
+          return "*0\r\n";  // Empty array for non-existing list
+      }
+  }
 
-    int start = std::stoi(parts[2]);
-    int end = std::stoi(parts[3]);
+  int list_size;
+  {
+      list_size = static_cast<int>(lists[listName].size());
+  }
 
-    int list_size = lists[parts[1]].size();
-    if (start >= list_size || start > end) {
-        return "*0\r\n";
-    }
+  int start, end;
 
-    if (end >= list_size) {
-        end = list_size - 1;
-    }
+  try {
+      start = std::stoi(parts[2]);
+      end = std::stoi(parts[3]);
+  } catch (...) {
+      return "-ERR Invalid LRANGE indices\r\n";
+  }
 
-    int range_size = end - start + 1;
-    std::string res = "*" + std::to_string(range_size) + "\r\n";
+  // Handle negative indices
+  if (start < 0) start = list_size + start;
+  if (end < 0) end = list_size + end;
+  
+  // Clamp bounds
+  if (start < 0) start = 0;
+  if (end < 0) end = 0;
+  if (start >= list_size || start > end) {
+      return "*0\r\n";
+  }
+  if (end >= list_size) {
+      end = list_size - 1;
+  }
 
-    for (int i = start; i <= end; ++i) {
-        const std::string& elem = lists[parts[1]][i];
-        res += "$" + std::to_string(elem.size()) + "\r\n" + elem + "\r\n";
-    }
-    return res;
+  int range_size = end - start + 1;
+  std::string res = "*" + std::to_string(range_size) + "\r\n";
+
+  {
+      for (int i = start; i <= end; ++i) {
+          const std::string& elem = lists[listName][i];
+          res += "$" + std::to_string(elem.size()) + "\r\n" + elem + "\r\n";
+      }
+  }
+
+  return res;
 }
 
 int main(int argc, char **argv) {
