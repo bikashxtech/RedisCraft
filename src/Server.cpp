@@ -219,6 +219,10 @@ std::string handle_LRANGE(const char* resp) {
       return "-ERR Invalid LRANGE indices\r\n";
   }
   
+  if (start < 0) start = n + start;
+  if (end < 0) end = n + end;
+
+  if (start < 0) start = 0;
   if (end >= n) end = n - 1;
 
   if (start > end || start >= n) return "*0\r\n";
