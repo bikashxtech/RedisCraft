@@ -25,6 +25,7 @@ struct ValueWithExpiry {
 };
 
 std::unordered_map<std::string, ValueWithExpiry> redis_storage;
+std::unordered_map<std::string, std::vector<std::string>> lists;
 std::mutex storage_mutex;
 
 void cleanup_expired_keys() {
@@ -164,6 +165,30 @@ std::string handle_get(const char* resp) {
   return "$" + std::to_string(val.value.size()) + "\r\n" + val.value + "\r\n";
 }
 
+std::string handle_RPUSH(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if(parts.size() != 3) {
+        return "-ERR Invalid RPUSH Command";
+    }
+
+    std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
+
+    if (parts[0] != "rpush") {
+        return "-ERR Invalid RPUSH Command";
+    }
+
+    auto listName = parts[1];
+    
+    if(lists.find(listName) == lists.end()) {
+        std::vector<std::string> list  = {parts[2]};
+        lists[listName] = list;
+        return ":1\r\n";
+    }
+
+    lists[listName].push_back(parts[2]);
+    return ":" + std::to_string(lists[listName].size()) + "\r\n";
+}
+
 int main(int argc, char **argv) {
   // Flush after every std::cout / std::cerr
   std::thread(expiry_monitor).detach();
@@ -275,6 +300,9 @@ int main(int argc, char **argv) {
                       send(poll_fds[i].fd, res, strlen(res), 0);
                   } else if(cmd.find("GET") != std::string::npos) {
                       const char* res = handle_get(p).c_str();
+                      send(poll_fds[i].fd, res, strlen(res), 0);
+                  } else if(cmd.find("RPUSH") != std::string::npos) {
+                      const char* res = handle_RPUSH(p).c_str();
                       send(poll_fds[i].fd, res, strlen(res), 0);
                   }
                    else {
