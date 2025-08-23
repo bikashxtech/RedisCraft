@@ -212,15 +212,20 @@ std::string handle_LRANGE(const char* resp) {
     int start = std::stoi(parts[2]);
     int end = std::stoi(parts[3]);
 
-    if (start >= lists[parts[1]].size() || start > end) {
+    int list_size = lists[parts[1]].size();
+    if (start >= list_size || start > end) {
         return "*0\r\n";
     }
 
-    std::string res = "*" + std::to_string(end - start + 1) + "\r\n";
+    if (end >= list_size) {
+        end = list_size - 1;
+    }
 
-    for(int i = start;(end < lists[parts[1]].size() && i <= end) || 
-        (end >= lists[parts[1]].size() && i < lists[parts[1]].size()); i++) {
-          res += "$" + std::to_string(lists[parts[1]][i].length()) + "\r\n" + lists[parts[1]][i] + "\r\n";
+    int range_size = end - start + 1;
+    std::string res = "*" + std::to_string(range_size) + "\r\n";
+
+    for (int i = start; i <= end; ++i) {
+        res += "$" + std::to_string(lists[parts[1]][i].length()) + "\r\n" + lists[parts[1]][i] + "\r\n";
     }
 
     return res;
