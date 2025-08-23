@@ -207,6 +207,7 @@ std::string handle_LRANGE(const char* resp) {
   const std::string& listName = parts[1];
 
   {
+      std::lock_guard<std::mutex> lock(storage_mutex);
       if (lists.find(listName) == lists.end()) {
           return "*0\r\n";  // Empty array for non-existing list
       }
@@ -214,6 +215,7 @@ std::string handle_LRANGE(const char* resp) {
 
   int list_size;
   {
+      std::lock_guard<std::mutex> lock(storage_mutex);
       list_size = static_cast<int>(lists[listName].size());
   }
 
@@ -244,6 +246,7 @@ std::string handle_LRANGE(const char* resp) {
   std::string res = "*" + std::to_string(range_size) + "\r\n";
 
   {
+      std::lock_guard<std::mutex> lock(storage_mutex);
       for (int i = start; i <= end; ++i) {
           const std::string& elem = lists[listName][i];
           res += "$" + std::to_string(elem.size()) + "\r\n" + elem + "\r\n";
