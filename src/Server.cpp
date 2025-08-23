@@ -309,7 +309,7 @@ std::string handle_LPOP(const char* resp) {
             numPop = it -> second.size();
         }
 
-        std::string res = "*" + std::to_string(numPop);
+        std::string res = "*" + std::to_string(numPop) + "\r\n";
 
         for(int i = 0; i < numPop; i++) {
             std::string popped_element = it -> second[0];
