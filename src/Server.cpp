@@ -167,7 +167,7 @@ std::string handle_get(const char* resp) {
 
 std::string handle_RPUSH(const char* resp) {
     auto parts = parse_resp_array(resp);
-    if(parts.size() != 3) {
+    if(parts.size() < 3) {
         return "-ERR Invalid RPUSH Command";
     }
 
@@ -180,12 +180,16 @@ std::string handle_RPUSH(const char* resp) {
     auto listName = parts[1];
     
     if(lists.find(listName) == lists.end()) {
-        std::vector<std::string> list  = {parts[2]};
+        std::vector<std::string> list;
+        for(int i = 2; i < parts.size() ;i++) {
+            list.push_back(parts[i]);
+        }
         lists[listName] = list;
-        return ":1\r\n";
+        return ":" + std::to_string(list.size()) + "\r\n";
     }
-
-    lists[listName].push_back(parts[2]);
+    for(int i = 2; i < parts.size() ;i++) {
+        lists[listName].push_back(parts[i]);
+    }
     return ":" + std::to_string(lists[listName].size()) + "\r\n";
 }
 
