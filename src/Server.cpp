@@ -193,6 +193,39 @@ std::string handle_RPUSH(const char* resp) {
     return ":" + std::to_string(lists[listName].size()) + "\r\n";
 }
 
+std::string handle_LRANGE(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() < 4) {
+        return "-ERR Invalid LRANGE Command";
+    }
+
+    std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
+
+    if(parts[0] != "lrange") {
+        return "-ERR Invalid LRANGE Command";
+    }
+
+    if (lists.find(parts[1]) == lists.end()) {
+        return "*0\r\n";
+    }
+
+    int start = std::stoi(parts[2]);
+    int end = std::stoi(parts[3]);
+
+    if (start >= lists[parts[1]].size() || start > end) {
+        return "*0\r\n";
+    }
+
+    std::string res = "*" + std::to_string(end - start + 1) + "\r\n";
+
+    for(int i = start;(end < lists[parts[1]].size() && i <= end) || 
+        (end >= lists[parts[1]].size() && i < lists[parts[1]].size()); i++) {
+          res += "$" + std::to_string(lists[parts[1]][i].length()) + "\r\n" + lists[parts[1]][i] + "\r\n";
+    }
+
+    return res;
+}
+
 int main(int argc, char **argv) {
   // Flush after every std::cout / std::cerr
   std::thread(expiry_monitor).detach();
@@ -307,6 +340,9 @@ int main(int argc, char **argv) {
                       send(poll_fds[i].fd, res, strlen(res), 0);
                   } else if(cmd.find("RPUSH") != std::string::npos) {
                       const char* res = handle_RPUSH(p).c_str();
+                      send(poll_fds[i].fd, res, strlen(res), 0);
+                  } else if(cmd.find("LRANGE") != std::string::npos) {
+                      const char* res = handle_LRANGE(p).c_str();
                       send(poll_fds[i].fd, res, strlen(res), 0);
                   }
                    else {
