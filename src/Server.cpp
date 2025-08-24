@@ -375,11 +375,9 @@ std::string handle_BLPOP(const char* resp, int client_fd) {
     auto parts = parse_resp_array(resp);
 
     if (parts.size() != 3) {
-        return "-ERR Invalid BLOP Arguments\r\n";
+        return "-ERR Invalid BLPOP Arguments\r\n";
     }
-    std::transform(parts[0].begin(), parts[0].end(), parts[0].end(), [](unsigned char c){
-        return ::tolower(c);
-    });
+    std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
     if (parts[0] != "blpop") {
         return "-ERR Invalid BLPOP Command\r\n";
     }
