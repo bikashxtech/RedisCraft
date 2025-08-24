@@ -184,49 +184,81 @@ std::string handle_RPUSH(const char* resp) {
     }
 
     std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
-
     if (parts[0] != "rpush") {
         return "-ERR Invalid RPUSH Command\r\n";
     }
 
-    auto listName = parts[1];
+    const std::string listName = parts[1];
+
+    // 1) Push all incoming values to the tail
     {
         std::lock_guard<std::mutex> lock(storage_mutex);
         auto& lst = lists[listName];
-    
         for (size_t i = 2; i < parts.size(); ++i) lst.push_back(parts[i]);
     }
 
-    {
-        std::lock_guard<std::mutex> lock(blocked_mutex);
-        auto it = blocked_clients.find(listName);
-        if(it != blocked_clients.end()) {
-            while(!it->second.empty()) {
-                int blocked_client_fd = it->second.front();
-                it->second.pop();
+    // 2) Serve any blocked BLPOP clients waiting on this list, one element per client (FIFO)
+    //    We pop from the head for each waiting client and send the response immediately.
+    std::vector<std::pair<int,std::string>> to_respond; // (fd, popped_value)
 
+    {
+        std::lock_guard<std::mutex> blk_lock(blocked_mutex);
+        auto it = blocked_clients.find(listName);
+        if (it != blocked_clients.end()) {
+            while (!it->second.empty()) {
+                // Check if the list has an element to serve
+                std::string popped_element;
+                bool hasValue = false;
+                {
+                    std::lock_guard<std::mutex> s_lock(storage_mutex);
+                    auto lit = lists.find(listName);
+                    if (lit != lists.end() && !lit->second.empty()) {
+                        popped_element = lit->second.front();              // pop head
+                        lit->second.erase(lit->second.begin());
+                        hasValue = true;
+                    }
+                }
+
+                if (!hasValue) break; // nothing left to serve to waiting clients
+
+                int blocked_client_fd = it->second.front(); it->second.pop();
+
+                // Clear blocked bookkeeping for this fd
                 client_blocked_on_list.erase(blocked_client_fd);
                 blocked_fds.erase(blocked_client_fd);
 
-                {
-                    std::lock_guard<std::mutex> wake_lock(wake_mutex);
-                    fds_to_unblock.push(blocked_client_fd);
-                }
+                to_respond.emplace_back(blocked_client_fd, std::move(popped_element));
             }
-            
-            if(it->second.empty()) {
+
+            if (it->second.empty()) {
                 blocked_clients.erase(it);
             }
         }
     }
 
-    int size_after_push = 0;
-    {
-        std::lock_guard<std::mutex> lock(storage_mutex);
-        size_after_push = lists[listName].size();
+    // 3) Send responses to the unblocked clients and schedule them to be re-added to poll()
+    for (auto& [fd, val] : to_respond) {
+        std::string response = "*2\r\n";
+        response += "$" + std::to_string(listName.size()) + "\r\n" + listName + "\r\n";
+        response += "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
+        // It's safe to send here; these FDs are not currently in poll_fds
+        send(fd, response.c_str(), response.size(), 0);
+
+        // Let the main loop add this fd back to poll_fds
+        {
+            std::lock_guard<std::mutex> wake_lock(wake_mutex);
+            fds_to_unblock.push(fd);
+        }
     }
 
-    return ":" + std::to_string(size_after_push) + "\r\n";
+    // 4) Return the current length of the list after serving any blocked clients
+    int size_after = 0;
+    {
+        std::lock_guard<std::mutex> lock(storage_mutex);
+        size_after = static_cast<int>(lists[listName].size());
+    }
+
+    return ":" + std::to_string(size_after) + "\r\n";
 }
 
 std::string handle_LPUSH(const char* resp) {
