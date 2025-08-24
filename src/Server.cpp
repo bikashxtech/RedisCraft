@@ -380,8 +380,8 @@ std::string handle_BLPOP(const char* resp, int client_fd) {
     std::transform(parts[0].begin(), parts[0].end(), parts[0].end(), [](unsigned char c){
         return ::tolower(c);
     });
-    if (parts[0] != "blop") {
-        return "-ERR Invalid BLOP Command\r\n";
+    if (parts[0] != "blpop") {
+        return "-ERR Invalid BLPOP Command\r\n";
     }
 
     std::string list_name = parts[1];
@@ -601,7 +601,7 @@ int main(int argc, char **argv) {
                                 blocked_fds.insert(fd);
                             }
                             poll_fds.erase(poll_fds.begin() + i);
-                            continue; // skipped increment i because erased
+                            continue;
                         } else {
                             send(fd, res.c_str(), res.size(), 0);
                         }
