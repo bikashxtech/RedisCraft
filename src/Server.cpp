@@ -13,7 +13,9 @@
 #include <chrono>
 #include <thread>
 #include <mutex>
+#include <queue>
 #include <unordered_map>
+#include <unordered_set>
 #include <netdb.h>
 
 using Clock = std::chrono::steady_clock;
@@ -26,7 +28,16 @@ struct ValueWithExpiry {
 
 std::unordered_map<std::string, ValueWithExpiry> redis_storage;
 std::unordered_map<std::string, std::vector<std::string>> lists;
+
+std::unordered_map<std::string, std::queue<int>> blocked_clients;
+std::unordered_map<int, std::string> client_blocked_on_list;
+
+std::unordered_set<int> blocked_fds;
+
 std::mutex storage_mutex;
+std::mutex blocked_mutex;
+std::mutex wake_mutex;
+std::queue<int> fds_to_unblock;
 
 void cleanup_expired_keys() {
     std::lock_guard<std::mutex> lock(storage_mutex);
@@ -179,12 +190,43 @@ std::string handle_RPUSH(const char* resp) {
     }
 
     auto listName = parts[1];
-
-    std::lock_guard<std::mutex> lock(storage_mutex);
-    auto& lst = lists[listName];
+    {
+        std::lock_guard<std::mutex> lock(storage_mutex);
+        auto& lst = lists[listName];
     
-    for (size_t i = 2; i < parts.size(); ++i) lst.push_back(parts[i]);
-    return ":" + std::to_string(lst.size()) + "\r\n";
+        for (size_t i = 2; i < parts.size(); ++i) lst.push_back(parts[i]);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(blocked_mutex);
+        auto it = blocked_clients.find(listName);
+        if(it != blocked_clients.end()) {
+            while(!it->second.empty()) {
+                int blocked_client_fd = it->second.front();
+                it->second.pop();
+
+                client_blocked_on_list.erase(blocked_client_fd);
+                blocked_fds.erase(blocked_client_fd);
+
+                {
+                    std::lock_guard<std::mutex> wake_lock(wake_mutex);
+                    fds_to_unblock.push(blocked_client_fd);
+                }
+            }
+            
+            if(it->second.empty()) {
+                blocked_clients.erase(it);
+            }
+        }
+    }
+
+    int size_after_push = 0;
+    {
+        std::lock_guard<std::mutex> lock(storage_mutex);
+        size_after_push = lists[listName].size();
+    }
+
+    return ":" + std::to_string(size_after_push) + "\r\n";
 }
 
 std::string handle_LPUSH(const char* resp) {
@@ -328,6 +370,62 @@ std::string handle_LPOP(const char* resp) {
     return "$" + std::to_string(popped_element.size()) + "\r\n" + popped_element + "\r\n";
 }
 
+//TO BE COMPLETED
+std::string handle_BLPOP(const char* resp, int client_fd) {
+    auto parts = parse_resp_array(resp);
+
+    if (parts.size() != 3) {
+        return "-ERR Invalid BLOP Arguments\r\n";
+    }
+    std::transform(parts[0].begin(), parts[0].end(), parts[0].end(), [](unsigned char c){
+        return ::tolower(c);
+    });
+    if (parts[0] != "blop") {
+        return "-ERR Invalid BLOP Command\r\n";
+    }
+
+    std::string list_name = parts[1];
+    uint8_t timeout;
+    try{
+        timeout= std::stoi(parts[2]);
+        if (timeout != 0) {
+            return "-ERR Only timeout=0 supported currently\r\n";
+        }
+    } catch(...) {
+        return "-ERR Invalid Timeout Argument\r\n";
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(storage_mutex);
+
+        auto it = lists.find(list_name);
+
+        if(it != lists.end() && !it -> second.empty()) {
+            std::string popped_element = lists[list_name].front();
+            it -> second.erase(it -> second.begin());
+
+            std::string response = "*2\r\n";
+
+            response += "$" + std::to_string(list_name.size()) + "\r\n" + list_name + "\r\n";
+            response += "$" + std::to_string(popped_element.size()) + "\r\n" + popped_element + "\r\n";
+
+            return response;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(blocked_mutex);
+        blocked_clients[list_name].push(client_fd);
+        client_blocked_on_list[client_fd] = list_name;
+        blocked_fds.insert(client_fd);
+    }
+
+    return "";
+
+}
+
+
+
 int main(int argc, char **argv) {
   // Flush after every std::cout / std::cerr
   std::thread(expiry_monitor).detach();
@@ -369,107 +467,167 @@ int main(int argc, char **argv) {
   poll_fds.push_back({server_fd, POLLIN, 0});
 
   while (true) {
+    {
+        std::lock_guard<std::mutex> wake_lock(wake_mutex);
+        while (!fds_to_unblock.empty()) {
+            int fd_to_add = fds_to_unblock.front();
+            fds_to_unblock.pop();
+
+            bool already_exists = false;
+            for (const auto& pfd : poll_fds) {
+                if (pfd.fd == fd_to_add) {
+                    already_exists = true;
+                    break;
+                }
+            }
+
+            if (!already_exists) {
+                poll_fds.push_back({fd_to_add, POLLIN, 0});
+            }
+        }
+    }
+
     int poll_count = poll(poll_fds.data(), poll_fds.size(), -1);
     if (poll_count < 0) {
-      std::cerr <<"Poll failed\n";
-      break;
+        std::cerr << "Poll failed\n";
+        break;
     }
 
     if (poll_fds[0].revents & POLLIN) {
-      sockaddr_in client_addr {};
-      socklen_t client_len = sizeof(client_addr);
-      int client_fd = accept(server_fd, (sockaddr*)&client_addr, &client_len);
+        sockaddr_in client_addr{};
+        socklen_t client_len = sizeof(client_addr);
+        int client_fd = accept(server_fd, (sockaddr*)&client_addr, &client_len);
 
-      if(client_fd >= 0) {
-        std::cout << "New client connected: FD " << client_fd << std::endl;
+        if (client_fd >= 0) {
+            std::cout << "New client connected: FD " << client_fd << std::endl;
 
-        poll_fds.push_back({client_fd, POLLIN, 0});
-      }
-    }
-    
-    for(size_t i = 1; i < poll_fds.size();) {
-      if (poll_fds[i].revents & POLLIN) {
-        char buffer[1024];
-        ssize_t bytes_read = read(poll_fds[i].fd, buffer, sizeof(buffer) - 1);
-        if(bytes_read <= 0) {
-          std::cout << "Client disconnected: FD " << poll_fds[i].fd << std::endl;
-          close(poll_fds[i].fd);
-          poll_fds.erase(poll_fds.begin() + i);
-          continue;
-        } else {
-          buffer[bytes_read] = '\0';
-
-          char* p = buffer;
-          std::string cmd(buffer);
-
-          if(*p != '*') {
-            if(cmd.find("PING") != std::string::npos) {
-              const char* pong = "+PONG\r\n";
-              send(poll_fds[i].fd, pong, strlen(pong), 0);
-            } else {
-              const char* err = "-ERR unknown command\r\n";
-              send(poll_fds[i].fd, err, strlen(err), 0);
+            std::lock_guard<std::mutex> blk_lock(blocked_mutex);
+            if (blocked_fds.find(client_fd) == blocked_fds.end()) {
+                poll_fds.push_back({client_fd, POLLIN, 0});
             }
-          } else {
-            if (cmd.find("PING") != std::string::npos) {
-              const char* pong = "+PONG\r\n";
-              send(poll_fds[i].fd, pong, strlen(pong), 0);
-            } else {
-                int idx = cmd.find("ECHO");
-                if (idx != std::string::npos) {
-                    int arg_pos = cmd.find("\r\n", idx);
-                    if (arg_pos != std::string::npos) {
-                        arg_pos += 2;
-                        if (cmd[arg_pos] == '$') {
-                            int len_start = arg_pos + 1;
-                            int len_end = cmd.find("\r\n", len_start);
-                            if (len_end != std::string::npos) {
-                                int len = std::stoi(cmd.substr(len_start, len_end - len_start));
-                                int data_start = len_end + 2;
-                                std::string message = cmd.substr(data_start, len);
+        }
+    }
 
-                                std::string res = "$" + std::to_string(message.size()) + "\r\n" + message + "\r\n";
-                                send(poll_fds[i].fd, res.c_str(), res.size(), 0);
+    for (size_t i = 1; i < poll_fds.size();) {
+        int fd = poll_fds[i].fd;
+
+        if (poll_fds[i].revents & POLLIN) {
+            char buffer[1024];
+            ssize_t bytes_read = read(fd, buffer, sizeof(buffer) - 1);
+
+            if (bytes_read <= 0) {
+                std::cout << "Client disconnected: FD " << fd << std::endl;
+                close(fd);
+
+                {
+                    std::lock_guard<std::mutex> lock(blocked_mutex);
+                    blocked_fds.erase(fd);
+
+                    auto it = client_blocked_on_list.find(fd);
+                    if (it != client_blocked_on_list.end()) {
+                        std::string listname = it->second;
+                        client_blocked_on_list.erase(it);
+
+                        auto q_it = blocked_clients.find(listname);
+                        if (q_it != blocked_clients.end()) {
+                            std::queue<int> new_q;
+                            while (!q_it->second.empty()) {
+                                int front_fd = q_it->second.front();
+                                q_it->second.pop();
+                                if (front_fd != fd)
+                                    new_q.push(front_fd);
+                            }
+                            if (new_q.empty()) {
+                                blocked_clients.erase(q_it);
+                            } else {
+                                blocked_clients[listname] = new_q;
                             }
                         }
                     }
+                }
+
+                poll_fds.erase(poll_fds.begin() + i);
+                continue;
+            } else {
+                buffer[bytes_read] = '\0';
+                char* p = buffer;
+                std::string cmd(buffer);
+
+                if (*p != '*') {
+                    if (cmd.find("PING") != std::string::npos) {
+                        const char* pong = "+PONG\r\n";
+                        send(fd, pong, strlen(pong), 0);
+                    } else {
+                        const char* err = "-ERR unknown command\r\n";
+                        send(fd, err, strlen(err), 0);
+                    }
                 } else {
-                  if (cmd.find("SET") != std::string::npos) {
-                      const char* res =  handle_set(p).c_str();
-                      send(poll_fds[i].fd, res, strlen(res), 0);
-                  } else if(cmd.find("GET") != std::string::npos) {
-                      const char* res = handle_get(p).c_str();
-                      send(poll_fds[i].fd, res, strlen(res), 0);
-                  } else if(cmd.find("RPUSH") != std::string::npos) {
-                      std::string res = handle_RPUSH(p);
-                      send(poll_fds[i].fd, res.c_str(), res.size(), 0);
-                  } else if(cmd.find("LRANGE") != std::string::npos) {
-                      std::string res = handle_LRANGE(p);
-                      send(poll_fds[i].fd, res.c_str(), res.size(), 0);
-                  } else if(cmd.find("LPUSH") != std::string::npos) {
-                      std::string res = handle_LPUSH(p);
-                      send(poll_fds[i].fd, res.c_str(), res.size(), 0);
-                  } else if(cmd.find("LLEN") != std::string::npos) {
-                      std::string res = handle_LLEN(p);
-                      send(poll_fds[i].fd, res.c_str(), res.size(), 0);
-                  } else if(cmd.find("LPOP") != std::string::npos) {
-                      std::string res = handle_LPOP(p);
-                      send(poll_fds[i].fd, res.c_str(), res.size(), 0);
-                  } else {
-                      const char* err = "-ERR Invalid Unknown Command";
-                      send(poll_fds[i].fd, err, strlen(err), 0);
-                  }
+                    if (cmd.find("PING") != std::string::npos) {
+                        const char* pong = "+PONG\r\n";
+                        send(fd, pong, strlen(pong), 0);
+                    } else if (cmd.find("ECHO") != std::string::npos) {
+                        // existing ECHO implementation here (no change)
+                        int idx = cmd.find("ECHO");
+                        int arg_pos = cmd.find("\r\n", idx);
+                        if(arg_pos != std::string::npos) {
+                            arg_pos += 2;
+                            if(cmd[arg_pos] == '$') {
+                                int len_start = arg_pos + 1;
+                                int len_end = cmd.find("\r\n", len_start);
+                                if(len_end != std::string::npos) {
+                                    int len = std::stoi(cmd.substr(len_start, len_end - len_start));
+                                    int data_start = len_end + 2;
+                                    std::string message = cmd.substr(data_start, len);
+
+                                    std::string res = "$" + std::to_string(message.size()) + "\r\n" + message + "\r\n";
+                                    send(fd, res.c_str(), res.size(), 0);
+                                }
+                            }
+                        }
+                    } else if (cmd.find("SET") != std::string::npos) {
+                        std::string res = handle_set(p);
+                        send(fd, res.c_str(), res.size(), 0);
+                    } else if (cmd.find("GET") != std::string::npos) {
+                        std::string res = handle_get(p);
+                        send(fd, res.c_str(), res.size(), 0);
+                    } else if (cmd.find("RPUSH") != std::string::npos) {
+                        std::string res = handle_RPUSH(p);
+                        send(fd, res.c_str(), res.size(), 0);
+                    } else if (cmd.find("BLPOP") != std::string::npos) {
+                        std::string res = handle_BLPOP(p, fd);
+                        if (res.empty()) {
+                            {
+                                std::lock_guard<std::mutex> lock(blocked_mutex);
+                                blocked_fds.insert(fd);
+                            }
+                            poll_fds.erase(poll_fds.begin() + i);
+                            continue; // skipped increment i because erased
+                        } else {
+                            send(fd, res.c_str(), res.size(), 0);
+                        }
+                    } else if (cmd.find("LRANGE") != std::string::npos) {
+                        std::string res = handle_LRANGE(p);
+                        send(fd, res.c_str(), res.size(), 0);
+                    } else if (cmd.find("LPUSH") != std::string::npos) {
+                        std::string res = handle_LPUSH(p);
+                        send(fd, res.c_str(), res.size(), 0);
+                    } else if (cmd.find("LLEN") != std::string::npos) {
+                        std::string res = handle_LLEN(p);
+                        send(fd, res.c_str(), res.size(), 0);
+                    } else if (cmd.find("LPOP") != std::string::npos) {
+                        std::string res = handle_LPOP(p);
+                        send(fd, res.c_str(), res.size(), 0);
+                    } else {
+                        const char* err = "-ERR Invalid Unknown Command\r\n";
+                        send(fd, err, strlen(err), 0);
+                    }
                 }
             }
-            
-            
-           } 
-          }
         }
         i++;
-      }
-
     }
+  }
+
   for(auto &pfd : poll_fds) close(pfd.fd);
   close(server_fd);
   
