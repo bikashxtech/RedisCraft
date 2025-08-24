@@ -593,7 +593,7 @@ int main(int argc, char **argv) {
                         send(fd, res.c_str(), res.size(), 0);
                     } else if (cmd.find("BLPOP") != std::string::npos) {
                         std::string res = handle_BLPOP(p, fd);
-                        if (res.empty()) {
+                        if (res == "") {
                             {
                                 std::lock_guard<std::mutex> lock(blocked_mutex);
                                 blocked_fds.insert(fd);
