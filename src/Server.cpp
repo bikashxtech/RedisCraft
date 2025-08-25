@@ -36,8 +36,6 @@ std::unordered_set<int> blocked_fds;
 
 std::mutex storage_mutex;
 std::mutex blocked_mutex;
-std::mutex wake_mutex;
-std::queue<int> fds_to_unblock;
 
 void cleanup_expired_keys() {
     std::lock_guard<std::mutex> lock(storage_mutex);
@@ -190,68 +188,29 @@ std::string handle_RPUSH(const char* resp) {
 
     const std::string listName = parts[1];
 
-    // 1) Push all incoming values to the tail
     {
         std::lock_guard<std::mutex> lock(storage_mutex);
         auto& lst = lists[listName];
         for (size_t i = 2; i < parts.size(); ++i) lst.push_back(parts[i]);
     }
 
-    // 2) Serve any blocked BLPOP clients waiting on this list, one element per client (FIFO)
-    //    We pop from the head for each waiting client and send the response immediately.
-    std::vector<std::pair<int,std::string>> to_respond; // (fd, popped_value)
-
     {
-        std::lock_guard<std::mutex> blk_lock(blocked_mutex);
-        auto it = blocked_clients.find(listName);
-        if (it != blocked_clients.end()) {
-            while (!it->second.empty()) {
-                // Check if the list has an element to serve
-                std::string popped_element;
-                bool hasValue = false;
-                {
-                    std::lock_guard<std::mutex> s_lock(storage_mutex);
-                    auto lit = lists.find(listName);
-                    if (lit != lists.end() && !lit->second.empty()) {
-                        popped_element = lit->second.front();              // pop head
-                        lit->second.erase(lit->second.begin());
-                        hasValue = true;
-                    }
-                }
-
-                if (!hasValue) break; // nothing left to serve to waiting clients
-
-                int blocked_client_fd = it->second.front(); it->second.pop();
-
-                // Clear blocked bookkeeping for this fd
-                client_blocked_on_list.erase(blocked_client_fd);
-                blocked_fds.erase(blocked_client_fd);
-
-                to_respond.emplace_back(blocked_client_fd, std::move(popped_element));
-            }
-
-            if (it->second.empty()) {
-                blocked_clients.erase(it);
+        std::lock_guard<std::mutex> lock(blocked_mutex);
+        if (blocked_clients.find(listName) != blocked_clients.end()) {
+            std::lock_guard<std::mutex> lock(storage_mutex);
+            while (!blocked_clients[listName].empty() && !lists[listName].empty()) {
+                auto client = blocked_clients[listName].front();
+                auto response = handle_LPOP(("*2\r\n$4\r\nLPOP\r\n$" +  std::to_string(listName.size()) + 
+                                "\r\n" + listName + "\r\n").c_str());
+                response = "*2\r\n$" + std::to_string(listName.size()) + listName + "\r\n" + response; 
+                send(client, response.c_str(), response.size(), 0);
+                blocked_fds.erase(client);
+                client_blocked_on_list.erase(client);
             }
         }
     }
 
-    // 3) Send responses to the unblocked clients and schedule them to be re-added to poll()
-    for (auto& [fd, val] : to_respond) {
-        std::string response = "*2\r\n";
-        response += "$" + std::to_string(listName.size()) + "\r\n" + listName + "\r\n";
-        response += "$" + std::to_string(val.size()) + "\r\n" + val + "\r\n";
-        // It's safe to send here; these FDs are not currently in poll_fds
-        send(fd, response.c_str(), response.size(), 0);
-
-        // Let the main loop add this fd back to poll_fds
-        {
-            std::lock_guard<std::mutex> wake_lock(wake_mutex);
-            fds_to_unblock.push(fd);
-        }
-    }
-
-    // 4) Return the current length of the list after serving any blocked clients
+    
     int size_after = 0;
     {
         std::lock_guard<std::mutex> lock(storage_mutex);
@@ -440,14 +399,13 @@ std::string handle_BLPOP(const char* resp, int client_fd) {
             response += "$" + std::to_string(popped_element.size()) + "\r\n" + popped_element + "\r\n";
 
             return response;
-        }
-    }
 
-    {
-        std::lock_guard<std::mutex> lock(blocked_mutex);
-        blocked_clients[list_name].push(client_fd);
-        client_blocked_on_list[client_fd] = list_name;
-        blocked_fds.insert(client_fd);
+        } else if(it -> second.empty()) {
+            std::lock_guard<std::mutex> lock(blocked_mutex);
+            blocked_clients[list_name].push(client_fd);
+            client_blocked_on_list[client_fd] = list_name;
+            blocked_fds.insert(client_fd);
+        }
     }
 
     return "";
@@ -497,25 +455,6 @@ int main(int argc, char **argv) {
   poll_fds.push_back({server_fd, POLLIN, 0});
 
   while (true) {
-    {
-        std::lock_guard<std::mutex> wake_lock(wake_mutex);
-        while (!fds_to_unblock.empty()) {
-            int fd_to_add = fds_to_unblock.front();
-            fds_to_unblock.pop();
-
-            bool already_exists = false;
-            for (const auto& pfd : poll_fds) {
-                if (pfd.fd == fd_to_add) {
-                    already_exists = true;
-                    break;
-                }
-            }
-
-            if (!already_exists) {
-                poll_fds.push_back({fd_to_add, POLLIN, 0});
-            }
-        }
-    }
 
     int poll_count = poll(poll_fds.data(), poll_fds.size(), -1);
     if (poll_count < 0) {
@@ -530,16 +469,16 @@ int main(int argc, char **argv) {
 
         if (client_fd >= 0) {
             std::cout << "New client connected: FD " << client_fd << std::endl;
-
-            std::lock_guard<std::mutex> blk_lock(blocked_mutex);
-            if (blocked_fds.find(client_fd) == blocked_fds.end()) {
-                poll_fds.push_back({client_fd, POLLIN, 0});
-            }
         }
     }
 
     for (size_t i = 1; i < poll_fds.size();) {
+
         int fd = poll_fds[i].fd;
+        if (blocked_fds.find(fd) != blocked_fds.end()){
+            i++;
+            continue;
+        }
 
         if (poll_fds[i].revents & POLLIN) {
             char buffer[1024];
@@ -551,28 +490,10 @@ int main(int argc, char **argv) {
 
                 {
                     std::lock_guard<std::mutex> lock(blocked_mutex);
-                    blocked_fds.erase(fd);
-
-                    auto it = client_blocked_on_list.find(fd);
-                    if (it != client_blocked_on_list.end()) {
-                        std::string listname = it->second;
-                        client_blocked_on_list.erase(it);
-
-                        auto q_it = blocked_clients.find(listname);
-                        if (q_it != blocked_clients.end()) {
-                            std::queue<int> new_q;
-                            while (!q_it->second.empty()) {
-                                int front_fd = q_it->second.front();
-                                q_it->second.pop();
-                                if (front_fd != fd)
-                                    new_q.push(front_fd);
-                            }
-                            if (new_q.empty()) {
-                                blocked_clients.erase(q_it);
-                            } else {
-                                blocked_clients[listname] = new_q;
-                            }
-                        }
+                    auto it = blocked_fds.find(fd);
+                    if(it != blocked_fds.end()) {
+                        client_blocked_on_list.erase(fd);
+                        blocked_fds.erase(fd);
                     }
                 }
 
@@ -626,11 +547,6 @@ int main(int argc, char **argv) {
                     } else if (cmd.find("BLPOP") != std::string::npos) {
                         std::string res = handle_BLPOP(p, fd);
                         if (res == "") {
-                            {
-                                std::lock_guard<std::mutex> lock(blocked_mutex);
-                                blocked_fds.insert(fd);
-                            }
-                            poll_fds.erase(poll_fds.begin() + i);
                             continue;
                         } else {
                             send(fd, res.c_str(), res.size(), 0);
