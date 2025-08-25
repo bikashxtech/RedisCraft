@@ -175,6 +175,57 @@ std::string handle_get(const char* resp) {
   return "$" + std::to_string(val.value.size()) + "\r\n" + val.value + "\r\n";
 }
 
+std::string handle_LPOP(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if(parts.size() < 2) {
+        return "-ERR Invalid LPOP Command\r\n";
+    }
+
+    std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
+    if(parts[0] != "lpop") {
+        return "-ERR Invalid LPOP Command\r\n";
+    }
+
+    bool args = false;
+
+    if(parts.size() == 3) {
+        args = true;
+    }
+
+    std::lock_guard<std::mutex> lock(storage_mutex);
+
+    auto it = lists.find(parts[1]);
+
+    if (it == lists.end()) {
+        return "$-1\r\n";
+    }
+
+    if (args) {
+      try{
+        int numPop = std::stoi(parts[2]);
+        if (numPop > it -> second.size()) {
+            numPop = it -> second.size();
+        }
+
+        std::string res = "*" + std::to_string(numPop) + "\r\n";
+
+        for(int i = 0; i < numPop; i++) {
+            std::string popped_element = it -> second[0];
+            it -> second.erase(it -> second.begin());
+            res += "$" + std::to_string(popped_element.size()) + "\r\n" + popped_element + "\r\n"; 
+        }
+        
+        return res;
+      } catch (...) {
+          return "-ERR Invalid Argument\r\n";
+      }
+    }
+    std::string popped_element = it -> second[0];
+    it -> second.erase(it -> second.begin());
+
+    return "$" + std::to_string(popped_element.size()) + "\r\n" + popped_element + "\r\n";
+}
+
 std::string handle_RPUSH(const char* resp) {
     auto parts = parse_resp_array(resp);
     if(parts.size() < 3) {
@@ -308,57 +359,6 @@ std::string handle_LLEN(const char* resp) {
     if(it == lists.end()) return ":0\r\n";
 
     return ":" + std::to_string(it -> second.size()) + "\r\n";
-}
-
-std::string handle_LPOP(const char* resp) {
-    auto parts = parse_resp_array(resp);
-    if(parts.size() < 2) {
-        return "-ERR Invalid LPOP Command\r\n";
-    }
-
-    std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
-    if(parts[0] != "lpop") {
-        return "-ERR Invalid LPOP Command\r\n";
-    }
-
-    bool args = false;
-
-    if(parts.size() == 3) {
-        args = true;
-    }
-
-    std::lock_guard<std::mutex> lock(storage_mutex);
-
-    auto it = lists.find(parts[1]);
-
-    if (it == lists.end()) {
-        return "$-1\r\n";
-    }
-
-    if (args) {
-      try{
-        int numPop = std::stoi(parts[2]);
-        if (numPop > it -> second.size()) {
-            numPop = it -> second.size();
-        }
-
-        std::string res = "*" + std::to_string(numPop) + "\r\n";
-
-        for(int i = 0; i < numPop; i++) {
-            std::string popped_element = it -> second[0];
-            it -> second.erase(it -> second.begin());
-            res += "$" + std::to_string(popped_element.size()) + "\r\n" + popped_element + "\r\n"; 
-        }
-        
-        return res;
-      } catch (...) {
-          return "-ERR Invalid Argument\r\n";
-      }
-    }
-    std::string popped_element = it -> second[0];
-    it -> second.erase(it -> second.begin());
-
-    return "$" + std::to_string(popped_element.size()) + "\r\n" + popped_element + "\r\n";
 }
 
 //TO BE COMPLETED
