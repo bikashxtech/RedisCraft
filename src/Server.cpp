@@ -405,10 +405,9 @@ std::string handle_BLPOP(const char* resp, int client_fd) {
             blocked_clients[list_name].push(client_fd);
             client_blocked_on_list[client_fd] = list_name;
             blocked_fds.insert(client_fd);
+            return "";
         }
     }
-
-    return "";
 
 }
 
