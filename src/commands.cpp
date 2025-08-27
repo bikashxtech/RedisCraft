@@ -320,7 +320,7 @@ std::string handle_XADD(const char* resp) {
     std::string stream_key = parts[1];
     std::string entry_id = parts[2];
 
-    if ((parts.size() - 3) % 2 != 0) 
+    if ((parts.size() - 3) % 2 != 0)
         return "-ERR Invalid field-value pairs\r\n";
 
     uint64_t ms_part = 0;
@@ -328,21 +328,11 @@ std::string handle_XADD(const char* resp) {
     uint64_t seq_part = 0;
 
     {
-        static std::regex id_regex(R"(^(\d+)-(\*|\d+)$)");
-        std::smatch match;
-        if (!std::regex_match(entry_id, match, id_regex)) {
+        // Parse ID
+        if (!parse_entry_id(entry_id, ms_part, seq_part))
             return "-ERR Invalid entry ID format\r\n";
-        }
-        try {
-            ms_part = std::stoull(match[1].str());
-            if (match[2].str() == "*") {
-                seq_wildcard = true;
-            } else {
-                seq_part = std::stoull(match[2].str());
-            }
-        } catch(...) {
-            return "-ERR Invalid entry ID format\r\n";
-        }
+        if (seq_part == UINT64_MAX)
+            seq_wildcard = true;
     }
 
     std::string new_entry_id;
@@ -352,7 +342,7 @@ std::string handle_XADD(const char* resp) {
         auto& stream = streams[stream_key];
 
         if (seq_wildcard) {
-            uint64_t last_seq_for_ms = seq_part = 0; 
+            uint64_t last_seq_for_ms = 0;
             bool found_ms = false;
 
             for (auto it = stream.rbegin(); it != stream.rend(); ++it) {
@@ -363,7 +353,7 @@ std::string handle_XADD(const char* resp) {
                     found_ms = true;
                     break;
                 }
-                if (entry_ms < ms_part) break; 
+                if (entry_ms < ms_part) break;
             }
 
             if (!found_ms) {
@@ -384,34 +374,35 @@ std::string handle_XADD(const char* resp) {
 
         if (!stream.empty()) {
             uint64_t new_ms, new_seq;
-            if (!parse_entry_id(new_entry_id, new_ms, new_seq)) {
+            if (!parse_entry_id(new_entry_id, new_ms, new_seq))
                 return "-ERR Invalid entry ID format\r\n";
-            }
+
+            if (new_ms == 0 && new_seq == 0)
+                return "-ERR The ID specified in XADD must be greater than 0-0\r\n";
+
             const std::string& last_id = stream.back().first;
             uint64_t last_ms, last_seq;
             if (!parse_entry_id(last_id, last_ms, last_seq)) {
-                last_ms = 0; last_seq = 0;
+                last_ms = 0; last_seq = 0; 
             }
-            if (!is_id_greater(new_ms, new_seq, last_ms, last_seq)) {
-                return "-ERR The ID specified in XADD must be greater than 0-0\r\n";
-            }
-            if (new_ms == 0 && new_seq == 0) {
-                return "-ERR The ID specified in XADD must be greater than 0-0\r\n";
-            }
+
+            if (!is_id_greater(new_ms, new_seq, last_ms, last_seq))
+                return "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+
         } else {
             uint64_t new_ms, new_seq;
-            if (!parse_entry_id(new_entry_id, new_ms, new_seq)) {
+            if (!parse_entry_id(new_entry_id, new_ms, new_seq))
                 return "-ERR Invalid entry ID format\r\n";
-            }
-            if (new_ms == 0 && new_seq == 0) {
+
+            if (new_ms == 0 && new_seq == 0)
                 return "-ERR The ID specified in XADD must be greater than 0-0\r\n";
-            }
         }
 
         StreamEntry entry;
         for (size_t i = 3; i < parts.size(); i += 2) {
             entry[parts[i]] = parts[i + 1];
         }
+
         stream.emplace_back(new_entry_id, std::move(entry));
     }
 
