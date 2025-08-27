@@ -1,6 +1,7 @@
 #include "commands.hpp"
 #include "parser.hpp"
 #include "storage.hpp"
+#include "StreamIDVerifier.hpp"
 
 #include <algorithm>
 #include <sys/socket.h>
@@ -322,16 +323,37 @@ std::string handle_XADD(const char* resp) {
     if ((parts.size() - 3) % 2 != 0) 
         return "-ERR Invalid field-value pairs\r\n";
 
-    StreamEntry entry;
-    for (size_t i = 3; i < parts.size(); i += 2) {
-        entry[parts[i]] = parts[i + 1];
+    uint64_t new_ms, new_seq;
+    if (!parse_entry_id(entry_id, new_ms, new_seq)) {
+        return "-ERR Invalid entry ID format\r\n";
+    }
+
+    if (new_ms == 0 && new_seq == 0) {
+        return "-ERR The ID specified in XADD must be greater than 0-0\r\n";
     }
 
     {
         std::lock_guard<std::mutex> lock(streams_mutex);
-        streams[stream_key].emplace_back(entry_id, std::move(entry));
+        auto& stream = streams[stream_key];
+
+        if (!stream.empty()) {
+            const std::string& last_id = stream.back().first;
+            uint64_t last_ms, last_seq;
+            if (!parse_entry_id(last_id, last_ms, last_seq)) {
+                last_ms = 0; last_seq = 0;
+            }
+
+            if (!is_id_greater(new_ms, new_seq, last_ms, last_seq)) {
+                return "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+            }
+        }
+
+        StreamEntry entry;
+        for (size_t i = 3; i < parts.size(); i += 2) {
+            entry[parts[i]] = parts[i + 1];
+        }
+        stream.emplace_back(entry_id, std::move(entry));
     }
 
-    // RESP bulk string of the entry ID
     return "$" + std::to_string(entry_id.size()) + "\r\n" + entry_id + "\r\n";
 }
