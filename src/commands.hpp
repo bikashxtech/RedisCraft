@@ -10,6 +10,7 @@ std::string handle_LPOP(const char* resp);
 std::string handle_LRANGE(const char* resp);
 std::string handle_LLEN(const char* resp);
 std::string handle_BLPOP(const char* resp, int client_fd);
+std::string handle_TYPE(const char* resp);
 
 // Util for safe send
 bool send_response(int fd, const std::string& response);

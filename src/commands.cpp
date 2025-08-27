@@ -285,3 +285,17 @@ std::string handle_BLPOP(const char* resp, int client_fd) {
 
     return "";
 }
+
+std::string handle_TYPE(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() != 2) return "-ERR wrong number of arguments for 'TYPE'\r\n";
+    if (to_lower(parts[0]) != "type") return "-ERR Invalid TYPE Command\r\n";
+
+    std::string key = parts[1];
+    std::lock_guard<std::mutex> lock(storage_mutex);
+    if (redis_storage.find(key) != redis_storage.end()) {
+        return "+string\r\n";
+    }
+
+    return "+none\r\n";
+}
