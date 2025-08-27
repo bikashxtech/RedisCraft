@@ -3,6 +3,8 @@
 #include <stdexcept>
 #include <cstdint>
 #include <chrono>
+#include "storage.hpp"
+#include "parser.hpp"
 using namespace std;
 
 bool parse_entry_id(const std::string& id, uint64_t& ms_time, uint64_t& seq_num, bool& seq_wildcard, bool& full_wildcard);

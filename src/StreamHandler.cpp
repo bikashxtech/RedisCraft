@@ -1,6 +1,4 @@
 #include "StreamHandler.hpp"
-#include "parser.hpp"
-#include "storage.hpp"
 
 bool parse_entry_id(const std::string& id, uint64_t& ms_time, uint64_t& seq_num, bool& seq_wildcard, bool& full_wildcard) {
     static std::regex id_regex(R"(^(\d+)-(\*|\d+)$)");
