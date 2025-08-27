@@ -57,6 +57,7 @@ std::vector<std::string> parse_resp_array(const char* resp) {
     return parts;
 }
 
+
 std::string resp_bulk_string(const std::string& s) {
     return "$" + std::to_string(s.size()) + "\r\n" + s + "\r\n";
 }

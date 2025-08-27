@@ -421,15 +421,6 @@ std::string handle_XRANGE(const char* resp) {
     if (!parse_range_id(start_id, start_ms, start_seq)) return "-ERR Invalid start ID\r\n";
     if (!parse_range_id(end_id, end_ms, end_seq)) return "-ERR Invalid end ID\r\n";
 
-    if (start_id == "-") {
-        start_ms = 0;
-        start_seq = 0;
-    }
-    if (end_id == "+") {
-        end_ms = UINT64_MAX;
-        end_seq = UINT64_MAX;
-    }
-
     std::vector<std::pair<std::string, StreamEntry>> result_entries;
 
     {
@@ -448,10 +439,7 @@ std::string handle_XRANGE(const char* resp) {
                 id_less_equal(entry_ms, entry_seq, end_ms, end_seq)) {
                 result_entries.push_back({entry_id, entry_kv});
             }
-            
-            if (!id_less_equal(entry_ms, entry_seq, end_ms, end_seq)) {
-                break;
-            }
+            if (!id_less_equal(entry_ms, entry_seq, end_ms, end_seq)) break;
         }
     }
 

@@ -43,22 +43,30 @@ uint64_t current_unix_time_ms() {
 std::string encode_xrange_response(const std::vector<std::pair<std::string, StreamEntry>>& entries) {
     std::string resp = "*" + std::to_string(entries.size()) + "\r\n";
     for (const auto& [entry_id, kvs] : entries) {
-        // Entry array: [ entry_id, [field1, value1, field2, value2, ...] ]
-        resp += "*" + std::to_string(2) + "\r\n";               // array of two elements
-        resp += resp_bulk_string(entry_id);                     // first element: entry ID
+        resp += "*2\r\n";                   
+        resp += resp_bulk_string(entry_id);  
 
-        // Flatten key-values preserving order (order of insertion in StreamEntry assumed)
         std::vector<std::string> kv_list;
         for (const auto& [k, v] : kvs) {
             kv_list.push_back(k);
             kv_list.push_back(v);
         }
-        resp += resp_array(kv_list);                            // second element: array of key-value strings
+        resp += resp_array(kv_list); 
     }
     return resp;
 }
 
 bool parse_range_id(const std::string& id, uint64_t& ms_time, uint64_t& seq_num) {
+    if (id == "-") {
+        ms_time = 0;
+        seq_num = 0;
+        return true;
+    }
+    if (id == "+") {
+        ms_time = UINT64_MAX;
+        seq_num = UINT64_MAX;
+        return true;
+    }
     static std::regex re(R"(^(\d+)(?:-(\d+))?$)");
     std::smatch match;
     if (!std::regex_match(id, match, re)) return false;
