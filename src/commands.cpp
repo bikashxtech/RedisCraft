@@ -92,41 +92,69 @@ std::string handle_RPUSH(const char* resp) {
 
     int addedCount = static_cast<int>(parts.size()) - 2;
 
-    std::unique_lock<std::mutex> lk(storage_mutex);
-    auto& lst = lists[listName];
+    {
+        std::unique_lock<std::mutex> lk(storage_mutex);
+        auto& lst = lists[listName];
 
-    // Push items
-    for (size_t i = 2; i < parts.size(); ++i) {
-        lst.push_back(parts[i]);
-    }
+        // Push items
+        for (size_t i = 2; i < parts.size(); ++i) {
+            lst.push_back(parts[i]);
+        }
+    } // unlock storage_mutex before sending responses to avoid deadlock
 
-    // Calculate the size BEFORE unblocking (what RPUSH should return)
-    int size_before_unblock = static_cast<int>(lst.size());
-
-    // Unblock waiting clients if any
+    int size_before_unblock = 0;
+    // Copy blocked clients under lock
+    std::queue<int> to_unblock;
     {
         std::scoped_lock multi_lock(storage_mutex, blocked_mutex);
         auto it = blocked_clients.find(listName);
-        while (it != blocked_clients.end() && !it->second.empty() && !lst.empty()) {
-            int client = it->second.front();
-            it->second.pop();
+        if (it != blocked_clients.end()) {
+            to_unblock = it->second;
+        }
 
-            std::string popped = lst.front();
-            lst.erase(lst.begin());
-
-            std::string response = "*2\r\n";
-            response += "$" + std::to_string(listName.size()) + "\r\n" + listName + "\r\n";
-            response += "$" + std::to_string(popped.size()) + "\r\n" + popped + "\r\n";
-            send_response(client, response);
-
-            blocked_fds.erase(client);
-            client_blocked_on_list.erase(client);
+        {
+            std::lock_guard<std::mutex> lk(storage_mutex);
+            size_before_unblock = static_cast<int>(lists[listName].size());
         }
     }
 
-    // Return the size_before_unblock (not after popping for blocked clients)
+    while (!to_unblock.empty()) {
+        int client = to_unblock.front();
+        to_unblock.pop();
+
+        std::string popped;
+        {
+            std::lock_guard<std::mutex> lk(storage_mutex);
+            auto& lst = lists[listName];
+            if (lst.empty()) break; // no more items to pop
+            popped = lst.front();
+            lst.erase(lst.begin());
+        }
+
+        // Format unblock response
+        std::string response = "*2\r\n";
+        response += "$" + std::to_string(listName.size()) + "\r\n" + listName + "\r\n";
+        response += "$" + std::to_string(popped.size()) + "\r\n" + popped + "\r\n";
+
+        // Queue the response for sending asynchronously
+        {
+            std::lock_guard<std::mutex> lk(pending_responses_mutex);
+            pending_responses[client] = response;
+        }
+
+        // Clean blocked client bookkeeping
+        {
+            std::scoped_lock lk(blocked_mutex, storage_mutex);
+            auto& q = blocked_clients[listName];
+            if (!q.empty() && q.front() == client) q.pop();
+            client_blocked_on_list.erase(client);
+            blocked_fds.erase(client);
+        }
+    }
+
     return ":" + std::to_string(size_before_unblock) + "\r\n";
 }
+
 
 
 // --- LPOP ---

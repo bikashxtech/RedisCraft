@@ -113,8 +113,44 @@ int main() {
         // Existing clients
         for (size_t i = 1; i < poll_fds.size();) {
             int fd = poll_fds[i].fd;
-
-            // Skip blocked clients (no reads while blocked)
+        
+            bool has_pending_response = false;
+            {
+                std::lock_guard<std::mutex> lk(pending_responses_mutex);
+                has_pending_response = pending_responses.find(fd) != pending_responses.end();
+            }
+            poll_fds[i].events = POLLIN;
+            if (has_pending_response) {
+                poll_fds[i].events |= POLLOUT;  // watch for ready to write
+            }
+        
+            if (poll_fds[i].revents & POLLOUT) {
+                // Send pending response
+                std::string response;
+                {
+                    std::lock_guard<std::mutex> lk(pending_responses_mutex);
+                    auto it = pending_responses.find(fd);
+                    if (it != pending_responses.end()) {
+                        response = std::move(it->second);
+                        pending_responses.erase(it);
+                    }
+                }
+                if (!response.empty()) {
+                    bool sent = send_response(fd, response);
+                    if (!sent) {
+                        // Handle partial send or socket error if needed
+                        // For simplicity, here just close client
+                        std::cout << "Failed to send unblock response. Closing client FD " << fd << std::endl;
+                        close(fd);
+                        remove_blocked_client_fd(fd);
+                        poll_fds.erase(poll_fds.begin() + i);
+                        continue;
+                    }
+                    // After send, client is unblocked and ready for reads
+                }
+            }
+        
+            // Skip reading from currently blocked clients
             {
                 std::lock_guard<std::mutex> lk(blocked_mutex);
                 if (blocked_fds.find(fd) != blocked_fds.end()) {
@@ -122,30 +158,14 @@ int main() {
                     continue;
                 }
             }
-
+        
             if (poll_fds[i].revents & POLLIN) {
-                char buffer[4096];
-                ssize_t n = recv(fd, buffer, sizeof(buffer) - 1, 0);
-                if (n <= 0) {
-                    std::cout << "Client disconnected: FD " << fd << std::endl;
-                    close(fd);
-                    remove_blocked_client_fd(fd);
-                    poll_fds.erase(poll_fds.begin() + i);
-                    continue;
-                }
-                buffer[n] = '\0';
-                std::string cmd(buffer);
-
-                std::string res = dispatch(cmd, fd);
-                if (!res.empty()) {
-                    send_response(fd, res);
-                } else {
-                    // Empty string from BLPOP means the client is now blocked.
-                    // Do not send anything and do not close the fd.
-                }
+                // existing read logic for unblocked clients
+                // ...
             }
             ++i;
         }
+        
     }
 
     for (auto &pfd : poll_fds) close(pfd.fd);

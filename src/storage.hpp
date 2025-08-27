@@ -19,6 +19,10 @@ struct ValueWithExpiry {
 extern std::unordered_map<std::string, ValueWithExpiry> redis_storage;
 extern std::unordered_map<std::string, std::vector<std::string>> lists;
 
+extern std::unordered_map<int, std::string> pending_responses;
+extern std::mutex pending_responses_mutex;
+
+
 extern std::unordered_map<std::string, std::queue<int>> blocked_clients; // list -> queued fds
 extern std::unordered_map<int, std::string> client_blocked_on_list;      // fd -> list
 extern std::unordered_set<int> blocked_fds;

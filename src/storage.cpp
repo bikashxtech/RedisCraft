@@ -3,6 +3,9 @@
 
 std::unordered_map<std::string, ValueWithExpiry> redis_storage;
 std::unordered_map<std::string, std::vector<std::string>> lists;
+std::unordered_map<int, std::string> pending_responses;
+std::mutex pending_responses_mutex;
+
 
 std::unordered_map<std::string, std::queue<int>> blocked_clients;
 std::unordered_map<int, std::string> client_blocked_on_list;
