@@ -10,6 +10,11 @@
 
 using Clock = std::chrono::steady_clock;
 using TimePoint = std::chrono::time_point<Clock>;
+using StreamEntry = std::unordered_map<std::string, std::string>;
+using Stream = std::vector<std::pair<std::string, StreamEntry>>;
+
+extern std::unordered_map<std::string, Stream> streams;
+extern std::mutex streams_mutex;
 
 struct ValueWithExpiry {
     std::string value;

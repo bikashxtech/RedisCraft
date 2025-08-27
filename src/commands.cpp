@@ -288,14 +288,50 @@ std::string handle_BLPOP(const char* resp, int client_fd) {
 
 std::string handle_TYPE(const char* resp) {
     auto parts = parse_resp_array(resp);
-    if (parts.size() != 2) return "-ERR wrong number of arguments for 'TYPE'\r\n";
+    if (parts.size() != 2) return "-ERR wrong number of arguments for 'type'\r\n";
     if (to_lower(parts[0]) != "type") return "-ERR Invalid TYPE Command\r\n";
 
     std::string key = parts[1];
-    std::lock_guard<std::mutex> lock(storage_mutex);
-    if (redis_storage.find(key) != redis_storage.end()) {
-        return "+string\r\n";
+
+    {
+        std::lock_guard<std::mutex> lock(storage_mutex);
+        if (redis_storage.find(key) != redis_storage.end()) {
+            return "+string\r\n";
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(streams_mutex);
+        if (streams.find(key) != streams.end()) {
+            return "+stream\r\n";
+        }
     }
 
     return "+none\r\n";
+}
+
+
+std::string handle_XADD(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() < 4) return "-ERR Invalid XADD Command\r\n";
+    if (to_lower(parts[0]) != "xadd") return "-ERR Invalid XADD Command\r\n";
+
+    std::string stream_key = parts[1];
+    std::string entry_id = parts[2];
+
+    if ((parts.size() - 3) % 2 != 0) 
+        return "-ERR Invalid field-value pairs\r\n";
+
+    StreamEntry entry;
+    for (size_t i = 3; i < parts.size(); i += 2) {
+        entry[parts[i]] = parts[i + 1];
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(streams_mutex);
+        streams[stream_key].emplace_back(entry_id, std::move(entry));
+    }
+
+    // RESP bulk string of the entry ID
+    return "$" + std::to_string(entry_id.size()) + "\r\n" + entry_id + "\r\n";
 }

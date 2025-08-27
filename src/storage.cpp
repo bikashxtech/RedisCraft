@@ -12,6 +12,9 @@ std::unordered_map<std::string, std::queue<int>> blocked_clients;
 std::unordered_map<int, std::string> client_blocked_on_list;
 std::unordered_set<int> blocked_fds;
 
+std::unordered_map<std::string, Stream> streams;
+std::mutex streams_mutex;
+
 std::mutex storage_mutex;
 std::mutex blocked_mutex;
 

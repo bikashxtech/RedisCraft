@@ -55,6 +55,8 @@ static std::string dispatch(const std::string& cmd, int fd) {
         return handle_BLPOP(cmd.c_str(), fd); // may be empty string to indicate "blocked"
     } else if (op == "type") {
         return handle_TYPE(cmd.c_str());
+    } else if (op == "xadd") {
+        return handle_XADD(cmd.c_str());
     } else {
         return "-ERR Invalid Unknown Command\r\n";
     }
