@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <iostream>
 
 // --- Internal helpers ---
 static bool is_expired(const ValueWithExpiry& v) {
@@ -90,70 +91,65 @@ std::string handle_RPUSH(const char* resp) {
     if (to_lower(parts[0]) != "rpush") return "-ERR Invalid RPUSH Command\r\n";
     const std::string listName = parts[1];
 
-    int addedCount = static_cast<int>(parts.size()) - 2;
+    std::unique_lock<std::mutex> lock(storage_mutex);
+    auto& lst = lists[listName];
 
-    {
-        std::unique_lock<std::mutex> lk(storage_mutex);
-        auto& lst = lists[listName];
-
-        // Push items
-        for (size_t i = 2; i < parts.size(); ++i) {
-            lst.push_back(parts[i]);
-        }
-    } // unlock storage_mutex before sending responses to avoid deadlock
-
-    int size_before_unblock = 0;
-    // Copy blocked clients under lock
-    std::queue<int> to_unblock;
-    {
-        std::scoped_lock multi_lock(storage_mutex, blocked_mutex);
-        auto it = blocked_clients.find(listName);
-        if (it != blocked_clients.end()) {
-            to_unblock = it->second;
-        }
-
-        {
-            std::lock_guard<std::mutex> lk(storage_mutex);
-            size_before_unblock = static_cast<int>(lists[listName].size());
-        }
+    // Push items
+    for (size_t i = 2; i < parts.size(); ++i) {
+        lst.push_back(parts[i]);
     }
 
-    while (!to_unblock.empty()) {
-        int client = to_unblock.front();
-        to_unblock.pop();
+    int size_before_unblock = static_cast<int>(lst.size());
 
-        std::string popped;
+    lock.unlock();
+
+    // Unblock clients who are waiting on this list
+    while (true) {
+        int client_fd = -1;
         {
-            std::lock_guard<std::mutex> lk(storage_mutex);
-            auto& lst = lists[listName];
-            if (lst.empty()) break; // no more items to pop
-            popped = lst.front();
-            lst.erase(lst.begin());
+            std::scoped_lock lk(storage_mutex, blocked_mutex);
+            auto it = blocked_clients.find(listName);
+            if (it == blocked_clients.end() || it->second.empty()) break;
+            client_fd = it->second.front();
+            it->second.pop();
         }
 
-        // Format unblock response
+        // Pop element to send
+        std::string popped;
+        {
+            std::lock_guard<std::mutex> lock(storage_mutex);
+            auto itList = lists.find(listName);
+            if (itList == lists.end() || itList->second.empty()) break;
+            popped = itList->second.front();
+            itList->second.erase(itList->second.begin());
+        }
+
+        // Construct response
         std::string response = "*2\r\n";
         response += "$" + std::to_string(listName.size()) + "\r\n" + listName + "\r\n";
         response += "$" + std::to_string(popped.size()) + "\r\n" + popped + "\r\n";
 
-        // Queue the response for sending asynchronously
-        {
-            std::lock_guard<std::mutex> lk(pending_responses_mutex);
-            pending_responses[client] = response;
+        // Send response synchronously
+        ssize_t sent = send(client_fd, response.c_str(), response.size(), 0);
+        if (sent != static_cast<ssize_t>(response.size())) {
+            std::cerr << "Failed to send unblock response to client fd " << client_fd << "\n";
+            // Close client and cleanup
+            close(client_fd);
+            remove_blocked_client_fd(client_fd);
+            continue;
         }
 
-        // Clean blocked client bookkeeping
+        // Cleanup blocked client tracking
         {
             std::scoped_lock lk(blocked_mutex, storage_mutex);
-            auto& q = blocked_clients[listName];
-            if (!q.empty() && q.front() == client) q.pop();
-            client_blocked_on_list.erase(client);
-            blocked_fds.erase(client);
+            client_blocked_on_list.erase(client_fd);
+            blocked_fds.erase(client_fd);
         }
     }
 
     return ":" + std::to_string(size_before_unblock) + "\r\n";
 }
+
 
 
 
