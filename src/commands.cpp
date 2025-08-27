@@ -103,7 +103,6 @@ std::string handle_RPUSH(const char* resp) {
 
     lock.unlock();
 
-    // Unblock clients who are waiting on this list
     while (true) {
         int client_fd = -1;
         {
@@ -114,7 +113,6 @@ std::string handle_RPUSH(const char* resp) {
             it->second.pop();
         }
 
-        // Pop element to send
         std::string popped;
         {
             std::lock_guard<std::mutex> lock(storage_mutex);
@@ -124,22 +122,18 @@ std::string handle_RPUSH(const char* resp) {
             itList->second.erase(itList->second.begin());
         }
 
-        // Construct response
         std::string response = "*2\r\n";
         response += "$" + std::to_string(listName.size()) + "\r\n" + listName + "\r\n";
         response += "$" + std::to_string(popped.size()) + "\r\n" + popped + "\r\n";
 
-        // Send response synchronously
         ssize_t sent = send(client_fd, response.c_str(), response.size(), 0);
         if (sent != static_cast<ssize_t>(response.size())) {
             std::cerr << "Failed to send unblock response to client fd " << client_fd << "\n";
-            // Close client and cleanup
             close(client_fd);
             remove_blocked_client_fd(client_fd);
             continue;
         }
 
-        // Cleanup blocked client tracking
         {
             std::scoped_lock lk(blocked_mutex, storage_mutex);
             client_blocked_on_list.erase(client_fd);
@@ -151,9 +145,6 @@ std::string handle_RPUSH(const char* resp) {
 }
 
 
-
-
-// --- LPOP ---
 std::string handle_LPOP(const char* resp) {
     auto parts = parse_resp_array(resp);
     if (parts.size() < 2) return "-ERR Invalid LPOP Command\r\n";
@@ -193,7 +184,6 @@ std::string handle_LPOP(const char* resp) {
     }
 }
 
-// --- LRANGE ---
 std::string handle_LRANGE(const char* resp) {
     auto parts = parse_resp_array(resp);
     if (parts.size() != 4) return "-ERR Invalid LRANGE Command\r\n";
@@ -251,31 +241,47 @@ std::string handle_BLPOP(const char* resp, int client_fd) {
 
     const std::string list_name = parts[1];
 
-    int timeout = 0;
-    try { timeout = std::stoi(parts[2]); }
-    catch (...) { return "-ERR Invalid Timeout Argument\r\n"; }
-    if (timeout != 0) return "-ERR Only timeout=0 supported currently\r\n";
+    double timeout_seconds = 0.0;
+    try {
+        timeout_seconds = std::stod(parts[2]);
+    } catch (...) {
+        return "-ERR Invalid Timeout Argument\r\n";
+    }
+    if (timeout_seconds < 0.0) return "-ERR Invalid Timeout Argument\r\n";
 
     {
         std::lock_guard<std::mutex> lk(storage_mutex);
         auto it = lists.find(list_name);
         if (it != lists.end() && !it->second.empty()) {
+            // List not empty, pop immediately
             std::string popped = it->second.front();
             it->second.erase(it->second.begin());
-            std::string response = "*2\r\n";
-            response += "$" + std::to_string(list_name.size()) + "\r\n" + list_name + "\r\n";
-            response += "$" + std::to_string(popped.size()) + "\r\n" + popped + "\r\n";
-            return response;
+            std::string resp = "*2\r\n";
+            resp += "$" + std::to_string(list_name.size()) + "\r\n" + list_name + "\r\n";
+            resp += "$" + std::to_string(popped.size()) + "\r\n" + popped + "\r\n";
+            return resp;
         }
     }
 
-    // Block the client
-    {
+    // List empty: block or timeout
+    if (timeout_seconds == 0.0) {
+        // Block indefinitely
         std::lock_guard<std::mutex> lk(blocked_mutex);
         blocked_clients[list_name].push(client_fd);
         client_blocked_on_list[client_fd] = list_name;
         blocked_fds.insert(client_fd);
+        return "";
     }
-    // Returning empty string signals the server loop to not send anything now.
+
+    // Block with timeout
+    TimePoint expiry = Clock::now() + std::chrono::milliseconds(static_cast<int>(timeout_seconds * 1000));
+    {
+        std::scoped_lock lk(blocked_mutex, storage_mutex);
+        blocked_clients[list_name].push(client_fd);
+        client_blocked_on_list[client_fd] = list_name;
+        blocked_fds.insert(client_fd);
+        blocked_clients_info[client_fd] = {client_fd, list_name, expiry};
+    }
+
     return "";
 }

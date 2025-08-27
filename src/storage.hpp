@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <mutex>
 #include <chrono>
+#include <queue>
 
 using Clock = std::chrono::steady_clock;
 using TimePoint = std::chrono::time_point<Clock>;
@@ -15,7 +16,14 @@ struct ValueWithExpiry {
     TimePoint expiry;
 };
 
+struct BlockedClientInfo {
+    int fd;
+    std::string list_name;
+    TimePoint expiry;
+};
+
 // Global state
+extern std::unordered_map<int, BlockedClientInfo> blocked_clients_info;
 extern std::unordered_map<std::string, ValueWithExpiry> redis_storage;
 extern std::unordered_map<std::string, std::vector<std::string>> lists;
 

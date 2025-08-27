@@ -1,6 +1,7 @@
 #include "storage.hpp"
 #include <thread>
 
+std::unordered_map<int, BlockedClientInfo> blocked_clients_info;
 std::unordered_map<std::string, ValueWithExpiry> redis_storage;
 std::unordered_map<std::string, std::vector<std::string>> lists;
 std::unordered_map<int, std::string> pending_responses;

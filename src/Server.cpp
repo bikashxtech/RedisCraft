@@ -58,8 +58,55 @@ static std::string dispatch(const std::string& cmd, int fd) {
     }
 }
 
+void blpop_timeout_monitor() {
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        TimePoint now = Clock::now();
+
+        std::vector<int> timed_out_clients;
+
+        {
+            std::lock_guard<std::mutex> lk(blocked_mutex);
+            for (const auto& [fd, info] : blocked_clients_info) {
+                if (info.expiry <= now) {
+                    timed_out_clients.push_back(fd);
+                }
+            }
+        }
+
+        for (int fd : timed_out_clients) {
+            std::string list_name;
+            {
+                std::scoped_lock lk(blocked_mutex, storage_mutex);
+                auto it_info = blocked_clients_info.find(fd);
+                if (it_info == blocked_clients_info.end()) continue;
+                list_name = it_info->second.list_name;
+
+                // Remove client from blocked_clients queue
+                auto& q = blocked_clients[list_name];
+                std::queue<int> new_queue;
+                while (!q.empty()) {
+                    int front = q.front();
+                    q.pop();
+                    if (front != fd) new_queue.push(front);
+                }
+                q.swap(new_queue);
+
+                blocked_clients_info.erase(fd);
+                client_blocked_on_list.erase(fd);
+                blocked_fds.erase(fd);
+            }
+
+            // Send null bulk string response for timeout
+            std::string response = "$-1\r\n";
+            send_response(fd, response);
+        }
+    }
+}
+
 int main() {
     std::thread(expiry_monitor).detach();
+    std::thread(blpop_timeout_monitor).detach();
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 
