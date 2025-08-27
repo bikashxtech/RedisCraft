@@ -1,580 +1,154 @@
+#include "parser.hpp"
+#include "commands.hpp"
+#include "storage.hpp"
+
 #include <iostream>
-#include <cstdlib>
 #include <string>
+#include <vector>
 #include <cstring>
+#include <algorithm>
+#include <thread>
+
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <poll.h>
-#include <vector>
-#include <algorithm>
-#include <chrono>
-#include <thread>
-#include <mutex>
-#include <queue>
-#include <unordered_map>
-#include <unordered_set>
 #include <netdb.h>
 
-using Clock = std::chrono::steady_clock;
-using TimePoint = std::chrono::time_point<Clock>;
+static std::string dispatch(const std::string& cmd, int fd) {
+    // Fast-path for inline PING/ECHO when resp parsing is not used
+    if (!cmd.empty() && cmd[0] != '*') {
+        if (cmd.find("PING") != std::string::npos) return "+PONG\r\n";
+        return "-ERR unknown command\r\n";
+    }
 
-struct ValueWithExpiry {
-    std::string value;
-    TimePoint expiry;
-};
+    // RESP array
+    auto parts = parse_resp_array(cmd.c_str());
+    if (parts.empty()) return "-ERR Protocol error\r\n";
+    std::string op = to_lower(parts[0]);
 
-std::unordered_map<std::string, ValueWithExpiry> redis_storage;
-std::unordered_map<std::string, std::vector<std::string>> lists;
-
-std::unordered_map<std::string, std::queue<int>> blocked_clients;
-std::unordered_map<int, std::string> client_blocked_on_list;
-
-std::unordered_set<int> blocked_fds;
-
-std::mutex storage_mutex;
-std::mutex blocked_mutex;
-
-void cleanup_expired_keys() {
-    std::lock_guard<std::mutex> lock(storage_mutex);
-    auto now = Clock::now();
-    for (auto it = redis_storage.begin(); it != redis_storage.end(); ) {
-        if (it -> second.expiry != TimePoint::min() && it->second.expiry <= now) {
-            it = redis_storage.erase(it);
-        } else {
-            ++it;
-        }
+    if (op == "ping") {
+        return "+PONG\r\n";
+    } else if (op == "echo") {
+        // Format: *2\r\n$4\r\nECHO\r\n$<n>\r\n<data>\r\n
+        // Just echo argument back as bulk
+        if (parts.size() != 2) return "-ERR wrong number of arguments for 'echo'\r\n";
+        const auto& message = parts[1];
+        return "$" + std::to_string(message.size()) + "\r\n" + message + "\r\n";
+    } else if (op == "set") {
+        return handle_set(cmd.c_str());
+    } else if (op == "get") {
+        return handle_get(cmd.c_str());
+    } else if (op == "rpush") {
+        return handle_RPUSH(cmd.c_str());
+    } else if (op == "lpush") {
+        return handle_LPUSH(cmd.c_str());
+    } else if (op == "lpop") {
+        return handle_LPOP(cmd.c_str());
+    } else if (op == "lrange") {
+        return handle_LRANGE(cmd.c_str());
+    } else if (op == "llen") {
+        return handle_LLEN(cmd.c_str());
+    } else if (op == "blpop") {
+        return handle_BLPOP(cmd.c_str(), fd); // may be empty string to indicate "blocked"
+    } else {
+        return "-ERR Invalid Unknown Command\r\n";
     }
 }
 
-void expiry_monitor() {
-    while(true) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-        cleanup_expired_keys();
-    }
-}
+int main() {
+    std::thread(expiry_monitor).detach();
+    std::cout << std::unitbuf;
+    std::cerr << std::unitbuf;
 
-std::string parse_bulk_string(const char* resp, size_t& pos) {
-    if(resp[pos] != '$') return "";
-
-    pos++;
-    int length = 0;
-
-    while (resp[pos] >= '0' && resp[pos] <= '9') {
-        length = length * 10 + (resp[pos++] - '0');
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        std::cerr << "Failed to create server socket\n";
+        return 1;
     }
 
-    if (resp[pos] != '\r' || resp[pos + 1] != '\n') return "";
-
-    pos += 2;
-
-    std::string result(&resp[pos], length);
-    pos += length;
-
-    if (resp[pos] != '\r' || resp[pos + 1] != '\n') return "";
-    pos += 2;
-
-    return result;
-}
-
-std::vector<std::string> parse_resp_array(const char* resp) {
-    size_t pos = 0;
-    if (resp[pos] != '*') return {};
-    pos++;
-
-    int count = 0;
-    while (resp[pos] >= '0' && resp[pos] <= '9') {
-        count = count * 10 + (resp[pos++] - '0');
+    int reuse = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        std::cerr << "setsockopt failed\n";
+        return 1;
     }
 
-    if (resp[pos] != '\r' || resp[pos + 1] != '\n') return {};
-    pos += 2;
+    sockaddr_in server_addr{};
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(6379);
 
-    std::vector<std::string> parts;
-    for(int i = 0; i < count; i++) {
-        std::string bulk = parse_bulk_string(resp, pos);
-        if (bulk.empty()) return {};
-        parts.push_back(bulk);
+    if (bind(server_fd, (sockaddr*)&server_addr, sizeof(server_addr)) != 0) {
+        std::cerr << "Failed to bind to port 6379\n";
+        return 1;
     }
-    return parts;
-}
-
-std::string handle_set(const char* resp) {
-  auto parts = parse_resp_array(resp);
-  if(parts.size() < 3) {
-      return "-ERR Invalid SET Command\r\n";
-  }
-
-  std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
-  if(parts[0] != "set") {
-      return "-ERR Invalid SET Command\r\n";
-  }
-
-  std::string key = parts[1];
-  std::string value = parts[2];
-  TimePoint expiry = TimePoint::min();
-
-  // Handle optional PX argument
-  if(parts.size() == 5) {
-      std::string option = parts[3];
-      std::transform(option.begin(), option.end(), option.begin(), ::tolower);
-      if(option == "px") {
-          try {
-              int ms = std::stoi(parts[4]);
-              expiry = Clock::now() + std::chrono::milliseconds(ms);
-          } catch(...) {
-              return "-ERR Invalid PX value\r\n";
-          }
-      } else {
-          return "-ERR Syntax error\r\n";
-      }
-  } else if(parts.size() != 3) {
-      return "-ERR Syntax error\r\n";
-  }
-
-  {
-      std::lock_guard<std::mutex> lock(storage_mutex);
-      redis_storage[key] = {value, expiry};
-  }
-
-  return "+OK\r\n";
-}
-
-std::string handle_get(const char* resp) {
-  auto parts = parse_resp_array(resp);
-  if(parts.size() != 2) {
-      return "-ERR Invalid GET command\r\n";
-  }
-
-  std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(),
-  [](unsigned char c){ return std::tolower(c); });
-  if(parts[0] != "get") {
-      return "-ERR Invalid GET command\r\n";
-  }
-  
-  std::string key = parts[1];
-  ValueWithExpiry val;
-  
-  {
-      std::lock_guard<std::mutex> lock(storage_mutex);
-      auto it = redis_storage.find(key);
-      if(it == redis_storage.end()) {
-          return "$-1\r\n";
-      }
-      val = it->second;
-  }
-
-  if(val.expiry != TimePoint::min() && Clock::now() >= val.expiry) {
-      std::lock_guard<std::mutex> lock(storage_mutex);
-      redis_storage.erase(key);
-      return "$-1\r\n";
-  }
-
-  return "$" + std::to_string(val.value.size()) + "\r\n" + val.value + "\r\n";
-}
-
-std::string handle_LPOP(const char* resp) {
-    auto parts = parse_resp_array(resp);
-    if(parts.size() < 2) {
-        return "-ERR Invalid LPOP Command\r\n";
+    if (listen(server_fd, 64) != 0) {
+        std::cerr << "listen failed\n";
+        return 1;
     }
 
-    std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
-    if(parts[0] != "lpop") {
-        return "-ERR Invalid LPOP Command\r\n";
-    }
+    std::vector<pollfd> poll_fds;
+    poll_fds.push_back({ server_fd, POLLIN, 0 });
 
-    bool args = false;
-
-    if(parts.size() == 3) {
-        args = true;
-    }
-
-    std::lock_guard<std::mutex> lock(storage_mutex);
-
-    auto it = lists.find(parts[1]);
-
-    if (it == lists.end()) {
-        return "$-1\r\n";
-    }
-
-    if (args) {
-      try{
-        int numPop = std::stoi(parts[2]);
-        if (numPop > it -> second.size()) {
-            numPop = it -> second.size();
+    while (true) {
+        int rc = poll(poll_fds.data(), poll_fds.size(), -1);
+        if (rc < 0) {
+            std::cerr << "Poll failed\n";
+            break;
         }
 
-        std::string res = "*" + std::to_string(numPop) + "\r\n";
-
-        for(int i = 0; i < numPop; i++) {
-            std::string popped_element = it -> second[0];
-            it -> second.erase(it -> second.begin());
-            res += "$" + std::to_string(popped_element.size()) + "\r\n" + popped_element + "\r\n"; 
-        }
-        
-        return res;
-      } catch (...) {
-          return "-ERR Invalid Argument\r\n";
-      }
-    }
-    std::string popped_element = it -> second[0];
-    it -> second.erase(it -> second.begin());
-
-    return "$" + std::to_string(popped_element.size()) + "\r\n" + popped_element + "\r\n";
-}
-
-std::string handle_RPUSH(const char* resp) {
-    auto parts = parse_resp_array(resp);
-    if(parts.size() < 3) {
-        return "-ERR Invalid RPUSH Command\r\n";
-    }
-
-    std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
-    if (parts[0] != "rpush") {
-        return "-ERR Invalid RPUSH Command\r\n";
-    }
-
-    const std::string listName = parts[1];
-
-    {
-        std::lock_guard<std::mutex> lock(storage_mutex);
-        auto& lst = lists[listName];
-        for (size_t i = 2; i < parts.size(); ++i) lst.push_back(parts[i]);
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(blocked_mutex);
-        if (blocked_clients.find(listName) != blocked_clients.end()) {
-            std::lock_guard<std::mutex> lock(storage_mutex);
-            while (!blocked_clients[listName].empty() && !lists[listName].empty()) {
-                auto client = blocked_clients[listName].front();
-                auto response = handle_LPOP(("*2\r\n$4\r\nLPOP\r\n$" +  std::to_string(listName.size()) + 
-                                "\r\n" + listName + "\r\n").c_str());
-                response = "*2\r\n$" + std::to_string(listName.size()) + listName + "\r\n" + response; 
-                send(client, response.c_str(), response.size(), 0);
-                blocked_fds.erase(client);
-                client_blocked_on_list.erase(client);
+        // New connections
+        if (poll_fds[0].revents & POLLIN) {
+            sockaddr_in client_addr{};
+            socklen_t client_len = sizeof(client_addr);
+            int client_fd = accept(server_fd, (sockaddr*)&client_addr, &client_len);
+            if (client_fd >= 0) {
+                std::cout << "New client connected: FD " << client_fd << std::endl;
+                poll_fds.push_back({ client_fd, POLLIN, 0 }); // <-- ADD to poll list
             }
         }
-    }
 
-    
-    int size_after = 0;
-    {
-        std::lock_guard<std::mutex> lock(storage_mutex);
-        size_after = static_cast<int>(lists[listName].size());
-    }
+        // Existing clients
+        for (size_t i = 1; i < poll_fds.size();) {
+            int fd = poll_fds[i].fd;
 
-    return ":" + std::to_string(size_after) + "\r\n";
-}
-
-std::string handle_LPUSH(const char* resp) {
-  auto parts = parse_resp_array(resp);
-  if(parts.size() < 3) {
-      return "-ERR Invalid LPUSH Command\r\n";
-  }
-
-  std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
-
-  if (parts[0] != "lpush") {
-      return "-ERR Invalid LPUSH Command\r\n";
-  }
-
-  auto listName = parts[1];
-
-  std::lock_guard<std::mutex> lock(storage_mutex);
-  auto& lst = lists[listName];
-  
-  for (size_t i = 2; i < parts.size(); ++i) lst.insert(lst.begin(), parts[i]);
-  return ":" + std::to_string(lst.size()) + "\r\n";
-}
-
-std::string handle_LRANGE(const char* resp) {
-  auto parts = parse_resp_array(resp);
-  if (parts.size() != 4) {
-      return "-ERR Invalid LRANGE Command\r\n";
-  }
-
-  std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(),
-  [](unsigned char c){ return std::tolower(c); });
-  if (parts[0] != "lrange") {
-      return "-ERR Invalid LRANGE Command\r\n";
-  }
-
-  const std::string& listName = parts[1];
-
-  std::vector<std::string> snapshot;
-  {
-      std::lock_guard<std::mutex> lock(storage_mutex);
-      auto it = lists.find(listName);
-      if (it == lists.end()) return "*0\r\n";
-      snapshot = it -> second;
-  }
-
-  int n = static_cast<int>(snapshot.size());
-  int start, end;
-
-  try{
-      start = std::stoi(parts[2]);
-      end = std::stoi(parts[3]);
-  } catch (...) {
-      return "-ERR Invalid LRANGE indices\r\n";
-  }
-  
-  if (start < 0) start = n + start;
-  if (end < 0) end = n + end;
-
-  if (start < 0) start = 0;
-  if (end >= n) end = n - 1;
-
-  if (start > end || start >= n) return "*0\r\n";
-
-  std::string res = "*" + std::to_string(end - start + 1) + "\r\n";
-
-  for (int i = start; i <= end; i++) {
-      const std::string& elem = snapshot[i];
-      res += "$" + std::to_string(elem.size()) + "\r\n" + elem + "\r\n";
-  }
-
-  return res;
-}
-
-std::string handle_LLEN(const char* resp) {
-    auto parts = parse_resp_array(resp);
-    if(parts.size() != 2) {
-        return "-ERR Invalid LLEN Command\r\n";
-    }
-
-    std::transform(parts[0].begin(),parts[0].end(), parts[0].begin(), ::tolower);
-
-    if(parts[0] != "llen") {
-        return "-ERR Invalid LLEN Command\r\n";
-    }
-    std::lock_guard<std::mutex> lock(storage_mutex);
-    auto it = lists.find(parts[1]);
-
-    if(it == lists.end()) return ":0\r\n";
-
-    return ":" + std::to_string(it -> second.size()) + "\r\n";
-}
-
-//TO BE COMPLETED
-std::string handle_BLPOP(const char* resp, int client_fd) {
-    auto parts = parse_resp_array(resp);
-
-    if (parts.size() != 3) {
-        return "-ERR Invalid BLPOP Arguments\r\n";
-    }
-    std::transform(parts[0].begin(), parts[0].end(), parts[0].begin(), ::tolower);
-    if (parts[0] != "blpop") {
-        return "-ERR Invalid BLPOP Command\r\n";
-    }
-
-    std::string list_name = parts[1];
-    uint8_t timeout;
-    try{
-        timeout= std::stoi(parts[2]);
-        if (timeout != 0) {
-            return "-ERR Only timeout=0 supported currently\r\n";
-        }
-    } catch(...) {
-        return "-ERR Invalid Timeout Argument\r\n";
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(storage_mutex);
-
-        auto it = lists.find(list_name);
-
-        if(it != lists.end() && !it -> second.empty()) {
-            std::string popped_element = lists[list_name].front();
-            it -> second.erase(it -> second.begin());
-
-            std::string response = "*2\r\n";
-
-            response += "$" + std::to_string(list_name.size()) + "\r\n" + list_name + "\r\n";
-            response += "$" + std::to_string(popped_element.size()) + "\r\n" + popped_element + "\r\n";
-
-            return response;
-
-        } else if(it -> second.empty()) {
-            std::lock_guard<std::mutex> lock(blocked_mutex);
-            blocked_clients[list_name].push(client_fd);
-            client_blocked_on_list[client_fd] = list_name;
-            blocked_fds.insert(client_fd);
-            return "";
-        }
-    }
-
-}
-
-
-
-int main(int argc, char **argv) {
-  // Flush after every std::cout / std::cerr
-  std::thread(expiry_monitor).detach();
-  std::cout << std::unitbuf;
-  std::cerr << std::unitbuf;
-  
-  int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (server_fd < 0) {
-   std::cerr << "Failed to create server socket\n";
-   return 1;
-  }
-  
-  // Since the tester restarts your program quite often, setting SO_REUSEADDR
-  // ensures that we don't run into 'Address already in use' errors
-  int reuse = 1;
-  if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
-    std::cerr << "setsockopt failed\n";
-    return 1;
-  }
-  
-  struct sockaddr_in server_addr;
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = INADDR_ANY;
-  server_addr.sin_port = htons(6379);
-  
-  if (bind(server_fd, (struct sockaddr *) &server_addr, sizeof(server_addr)) != 0) {
-    std::cerr << "Failed to bind to port 6379\n";
-    return 1;
-  }
-  
-  int connection_backlog = 5;
-  if (listen(server_fd, connection_backlog) != 0) {
-    std::cerr << "listen failed\n";
-    return 1;
-  }
-
-  std::vector<pollfd> poll_fds;
-
-  poll_fds.push_back({server_fd, POLLIN, 0});
-
-  while (true) {
-
-    int poll_count = poll(poll_fds.data(), poll_fds.size(), -1);
-    if (poll_count < 0) {
-        std::cerr << "Poll failed\n";
-        break;
-    }
-
-    if (poll_fds[0].revents & POLLIN) {
-        sockaddr_in client_addr{};
-        socklen_t client_len = sizeof(client_addr);
-        int client_fd = accept(server_fd, (sockaddr*)&client_addr, &client_len);
-
-        if (client_fd >= 0) {
-            std::cout << "New client connected: FD " << client_fd << std::endl;
-        }
-    }
-
-    for (size_t i = 1; i < poll_fds.size();) {
-
-        int fd = poll_fds[i].fd;
-        if (blocked_fds.find(fd) != blocked_fds.end()){
-            i++;
-            continue;
-        }
-
-        if (poll_fds[i].revents & POLLIN) {
-            char buffer[1024];
-            ssize_t bytes_read = read(fd, buffer, sizeof(buffer) - 1);
-
-            if (bytes_read <= 0) {
-                std::cout << "Client disconnected: FD " << fd << std::endl;
-                close(fd);
-
-                {
-                    std::lock_guard<std::mutex> lock(blocked_mutex);
-                    auto it = blocked_fds.find(fd);
-                    if(it != blocked_fds.end()) {
-                        client_blocked_on_list.erase(fd);
-                        blocked_fds.erase(fd);
-                    }
+            // Skip blocked clients (no reads while blocked)
+            {
+                std::lock_guard<std::mutex> lk(blocked_mutex);
+                if (blocked_fds.find(fd) != blocked_fds.end()) {
+                    ++i;
+                    continue;
                 }
+            }
 
-                poll_fds.erase(poll_fds.begin() + i);
-                continue;
-            } else {
-                buffer[bytes_read] = '\0';
-                char* p = buffer;
+            if (poll_fds[i].revents & POLLIN) {
+                char buffer[4096];
+                ssize_t n = recv(fd, buffer, sizeof(buffer) - 1, 0);
+                if (n <= 0) {
+                    std::cout << "Client disconnected: FD " << fd << std::endl;
+                    close(fd);
+                    remove_blocked_client_fd(fd);
+                    poll_fds.erase(poll_fds.begin() + i);
+                    continue;
+                }
+                buffer[n] = '\0';
                 std::string cmd(buffer);
 
-                if (*p != '*') {
-                    if (cmd.find("PING") != std::string::npos) {
-                        const char* pong = "+PONG\r\n";
-                        send(fd, pong, strlen(pong), 0);
-                    } else {
-                        const char* err = "-ERR unknown command\r\n";
-                        send(fd, err, strlen(err), 0);
-                    }
+                std::string res = dispatch(cmd, fd);
+                if (!res.empty()) {
+                    send_response(fd, res);
                 } else {
-                    if (cmd.find("PING") != std::string::npos) {
-                        const char* pong = "+PONG\r\n";
-                        send(fd, pong, strlen(pong), 0);
-                    } else if (cmd.find("ECHO") != std::string::npos) {
-                        // existing ECHO implementation here (no change)
-                        int idx = cmd.find("ECHO");
-                        int arg_pos = cmd.find("\r\n", idx);
-                        if(arg_pos != std::string::npos) {
-                            arg_pos += 2;
-                            if(cmd[arg_pos] == '$') {
-                                int len_start = arg_pos + 1;
-                                int len_end = cmd.find("\r\n", len_start);
-                                if(len_end != std::string::npos) {
-                                    int len = std::stoi(cmd.substr(len_start, len_end - len_start));
-                                    int data_start = len_end + 2;
-                                    std::string message = cmd.substr(data_start, len);
-
-                                    std::string res = "$" + std::to_string(message.size()) + "\r\n" + message + "\r\n";
-                                    send(fd, res.c_str(), res.size(), 0);
-                                }
-                            }
-                        }
-                    } else if (cmd.find("SET") != std::string::npos) {
-                        std::string res = handle_set(p);
-                        send(fd, res.c_str(), res.size(), 0);
-                    } else if (cmd.find("GET") != std::string::npos) {
-                        std::string res = handle_get(p);
-                        send(fd, res.c_str(), res.size(), 0);
-                    } else if (cmd.find("RPUSH") != std::string::npos) {
-                        std::string res = handle_RPUSH(p);
-                        send(fd, res.c_str(), res.size(), 0);
-                    } else if (cmd.find("BLPOP") != std::string::npos) {
-                        std::string res = handle_BLPOP(p, fd);
-                        if (res == "") {
-                            continue;
-                        } else {
-                            send(fd, res.c_str(), res.size(), 0);
-                        }
-                    } else if (cmd.find("LRANGE") != std::string::npos) {
-                        std::string res = handle_LRANGE(p);
-                        send(fd, res.c_str(), res.size(), 0);
-                    } else if (cmd.find("LPUSH") != std::string::npos) {
-                        std::string res = handle_LPUSH(p);
-                        send(fd, res.c_str(), res.size(), 0);
-                    } else if (cmd.find("LLEN") != std::string::npos) {
-                        std::string res = handle_LLEN(p);
-                        send(fd, res.c_str(), res.size(), 0);
-                    } else if (cmd.find("LPOP") != std::string::npos) {
-                        std::string res = handle_LPOP(p);
-                        send(fd, res.c_str(), res.size(), 0);
-                    } else {
-                        const char* err = "-ERR Invalid Unknown Command\r\n";
-                        send(fd, err, strlen(err), 0);
-                    }
+                    // Empty string from BLPOP means the client is now blocked.
+                    // Do not send anything and do not close the fd.
                 }
             }
+            ++i;
         }
-        i++;
     }
-  }
 
-  for(auto &pfd : poll_fds) close(pfd.fd);
-  close(server_fd);
-  
-   return 0;
+    for (auto &pfd : poll_fds) close(pfd.fd);
+    close(server_fd);
+    return 0;
 }

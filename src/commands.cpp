@@ -1,0 +1,258 @@
+#include "commands.hpp"
+#include "parser.hpp"
+#include "storage.hpp"
+
+#include <algorithm>
+#include <sys/socket.h>
+#include <unistd.h>
+
+// --- Internal helpers ---
+static bool is_expired(const ValueWithExpiry& v) {
+    return v.expiry != TimePoint::min() && Clock::now() >= v.expiry;
+}
+
+bool send_response(int fd, const std::string& response) {
+    ssize_t n = send(fd, response.c_str(), response.size(), 0);
+    return n == static_cast<ssize_t>(response.size());
+}
+
+// --- SET ---
+std::string handle_set(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() < 3) return "-ERR Invalid SET Command\r\n";
+    if (to_lower(parts[0]) != "set") return "-ERR Invalid SET Command\r\n";
+
+    std::string key = parts[1];
+    std::string value = parts[2];
+    TimePoint expiry = TimePoint::min();
+
+    if (parts.size() == 5) {
+        if (to_lower(parts[3]) != "px") return "-ERR Syntax error\r\n";
+        try {
+            int ms = std::stoi(parts[4]);
+            expiry = Clock::now() + std::chrono::milliseconds(ms);
+        } catch (...) {
+            return "-ERR Invalid PX value\r\n";
+        }
+    } else if (parts.size() != 3) {
+        return "-ERR Syntax error\r\n";
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(storage_mutex);
+        redis_storage[key] = { value, expiry };
+    }
+    return "+OK\r\n";
+}
+
+// --- GET ---
+std::string handle_get(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() != 2) return "-ERR Invalid GET command\r\n";
+    if (to_lower(parts[0]) != "get") return "-ERR Invalid GET command\r\n";
+
+    std::string key = parts[1];
+    ValueWithExpiry v;
+
+    {
+        std::lock_guard<std::mutex> lock(storage_mutex);
+        auto it = redis_storage.find(key);
+        if (it == redis_storage.end()) return "$-1\r\n";
+        v = it->second;
+        if (is_expired(v)) {
+            redis_storage.erase(key);
+            return "$-1\r\n";
+        }
+    }
+
+    return "$" + std::to_string(v.value.size()) + "\r\n" + v.value + "\r\n";
+}
+
+// --- LPUSH ---
+std::string handle_LPUSH(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() < 3) return "-ERR Invalid LPUSH Command\r\n";
+    if (to_lower(parts[0]) != "lpush") return "-ERR Invalid LPUSH Command\r\n";
+    const std::string listName = parts[1];
+
+    std::lock_guard<std::mutex> lk(storage_mutex);
+    auto& lst = lists[listName];
+    for (size_t i = 2; i < parts.size(); ++i) {
+        lst.insert(lst.begin(), parts[i]);
+    }
+    return ":" + std::to_string(lst.size()) + "\r\n";
+}
+
+// --- RPUSH ---
+std::string handle_RPUSH(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() < 3) return "-ERR Invalid RPUSH Command\r\n";
+    if (to_lower(parts[0]) != "rpush") return "-ERR Invalid RPUSH Command\r\n";
+    const std::string listName = parts[1];
+
+    // Push items
+    {
+        std::lock_guard<std::mutex> lk(storage_mutex);
+        auto& lst = lists[listName];
+        for (size_t i = 2; i < parts.size(); ++i) lst.push_back(parts[i]);
+    }
+
+    // Unblock waiting clients (if any)
+    {
+        std::scoped_lock lk(storage_mutex, blocked_mutex); // consistent multi-lock
+        auto it = blocked_clients.find(listName);
+        while (it != blocked_clients.end() && !it->second.empty() && !lists[listName].empty()) {
+            int client = it->second.front();
+            it->second.pop();
+
+            std::string popped = lists[listName].front();
+            lists[listName].erase(lists[listName].begin());
+
+            std::string response = "*2\r\n";
+            response += "$" + std::to_string(listName.size()) + "\r\n" + listName + "\r\n";
+            response += "$" + std::to_string(popped.size()) + "\r\n" + popped + "\r\n";
+            send_response(client, response);
+
+            blocked_fds.erase(client);
+            client_blocked_on_list.erase(client);
+        }
+        if (it != blocked_clients.end() && it->second.empty()) {
+            // optional cleanup
+            // blocked_clients.erase(it); // keep queues to avoid reallocation churn
+        }
+    }
+
+    int size_after = 0;
+    {
+        std::lock_guard<std::mutex> lk(storage_mutex);
+        size_after = static_cast<int>(lists[listName].size());
+    }
+    return ":" + std::to_string(size_after) + "\r\n";
+}
+
+// --- LPOP ---
+std::string handle_LPOP(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() < 2) return "-ERR Invalid LPOP Command\r\n";
+    if (to_lower(parts[0]) != "lpop") return "-ERR Invalid LPOP Command\r\n";
+
+    const std::string& key = parts[1];
+    bool hasCount = parts.size() == 3;
+    int count = 1;
+
+    std::lock_guard<std::mutex> lk(storage_mutex);
+    auto it = lists.find(key);
+    if (it == lists.end() || it->second.empty()) {
+        return hasCount ? "*0\r\n" : "$-1\r\n";
+    }
+
+    if (hasCount) {
+        try {
+            count = std::stoi(parts[2]);
+            if (count < 0) return "-ERR value is not an integer or out of range\r\n";
+        } catch (...) {
+            return "-ERR Invalid Argument\r\n";
+        }
+        int n = static_cast<int>(it->second.size());
+        if (count > n) count = n;
+
+        std::string res = "*" + std::to_string(count) + "\r\n";
+        while (count--) {
+            std::string elem = it->second.front();
+            it->second.erase(it->second.begin());
+            res += "$" + std::to_string(elem.size()) + "\r\n" + elem + "\r\n";
+        }
+        return res;
+    } else {
+        std::string elem = it->second.front();
+        it->second.erase(it->second.begin());
+        return "$" + std::to_string(elem.size()) + "\r\n" + elem + "\r\n";
+    }
+}
+
+// --- LRANGE ---
+std::string handle_LRANGE(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() != 4) return "-ERR Invalid LRANGE Command\r\n";
+    if (to_lower(parts[0]) != "lrange") return "-ERR Invalid LRANGE Command\r\n";
+
+    const std::string &listName = parts[1];
+
+    std::vector<std::string> snapshot;
+    {
+        std::lock_guard<std::mutex> lk(storage_mutex);
+        auto it = lists.find(listName);
+        if (it == lists.end()) return "*0\r\n";
+        snapshot = it->second;
+    }
+    int n = static_cast<int>(snapshot.size());
+    int start, end;
+    try {
+        start = std::stoi(parts[2]);
+        end   = std::stoi(parts[3]);
+    } catch (...) {
+        return "-ERR Invalid LRANGE indices\r\n";
+    }
+
+    if (start < 0) start = n + start;
+    if (end   < 0) end   = n + end;
+    if (start < 0) start = 0;
+    if (end >= n) end = n - 1;
+    if (start > end || start >= n) return "*0\r\n";
+
+    std::string res = "*" + std::to_string(end - start + 1) + "\r\n";
+    for (int i = start; i <= end; i++) {
+        const std::string& e = snapshot[i];
+        res += "$" + std::to_string(e.size()) + "\r\n" + e + "\r\n";
+    }
+    return res;
+}
+
+// --- LLEN ---
+std::string handle_LLEN(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() != 2) return "-ERR Invalid LLEN Command\r\n";
+    if (to_lower(parts[0]) != "llen") return "-ERR Invalid LLEN Command\r\n";
+
+    std::lock_guard<std::mutex> lk(storage_mutex);
+    auto it = lists.find(parts[1]);
+    if (it == lists.end()) return ":0\r\n";
+    return ":" + std::to_string(it->second.size()) + "\r\n";
+}
+
+// --- BLPOP (timeout=0 only) ---
+std::string handle_BLPOP(const char* resp, int client_fd) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() != 3) return "-ERR Invalid BLPOP Arguments\r\n";
+    if (to_lower(parts[0]) != "blpop") return "-ERR Invalid BLPOP Command\r\n";
+
+    const std::string list_name = parts[1];
+
+    int timeout = 0;
+    try { timeout = std::stoi(parts[2]); }
+    catch (...) { return "-ERR Invalid Timeout Argument\r\n"; }
+    if (timeout != 0) return "-ERR Only timeout=0 supported currently\r\n";
+
+    {
+        std::lock_guard<std::mutex> lk(storage_mutex);
+        auto it = lists.find(list_name);
+        if (it != lists.end() && !it->second.empty()) {
+            std::string popped = it->second.front();
+            it->second.erase(it->second.begin());
+            std::string response = "*2\r\n";
+            response += "$" + std::to_string(list_name.size()) + "\r\n" + list_name + "\r\n";
+            response += "$" + std::to_string(popped.size()) + "\r\n" + popped + "\r\n";
+            return response;
+        }
+    }
+
+    // Block the client
+    {
+        std::lock_guard<std::mutex> lk(blocked_mutex);
+        blocked_clients[list_name].push(client_fd);
+        client_blocked_on_list[client_fd] = list_name;
+        blocked_fds.insert(client_fd);
+    }
+    // Returning empty string signals the server loop to not send anything now.
+    return "";
+}
