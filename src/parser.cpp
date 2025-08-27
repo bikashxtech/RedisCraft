@@ -56,3 +56,15 @@ std::vector<std::string> parse_resp_array(const char* resp) {
     }
     return parts;
 }
+
+std::string resp_bulk_string(const std::string& s) {
+    return "$" + std::to_string(s.size()) + "\r\n" + s + "\r\n";
+}
+
+std::string resp_array(const std::vector<std::string>& elems) {
+    std::string out = "*" + std::to_string(elems.size()) + "\r\n";
+    for (const auto& e : elems) {
+        out += resp_bulk_string(e);
+    }
+    return out;
+}

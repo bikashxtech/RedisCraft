@@ -1,7 +1,7 @@
 #include "commands.hpp"
 #include "parser.hpp"
 #include "storage.hpp"
-#include "StreamIDVerifier.hpp"
+#include "StreamHandler.hpp"
 
 #include <algorithm>
 #include <sys/socket.h>
@@ -406,4 +406,54 @@ std::string handle_XADD(const char* resp) {
     }
 
     return "$" + std::to_string(new_entry_id.size()) + "\r\n" + new_entry_id + "\r\n";
+}
+
+std::string handle_XRANGE(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() < 4) return "-ERR Invalid XRANGE Command\r\n";
+    if (to_lower(parts[0]) != "xrange") return "-ERR Invalid XRANGE Command\r\n";
+
+    std::string stream_key = parts[1];
+    std::string start_id = parts[2];
+    std::string end_id = parts[3];
+
+    uint64_t start_ms, start_seq, end_ms, end_seq;
+    if (!parse_range_id(start_id, start_ms, start_seq)) return "-ERR Invalid start ID\r\n";
+    if (!parse_range_id(end_id, end_ms, end_seq)) return "-ERR Invalid end ID\r\n";
+
+    if (start_id == "-") {
+        start_ms = 0;
+        start_seq = 0;
+    }
+    if (end_id == "+") {
+        end_ms = UINT64_MAX;
+        end_seq = UINT64_MAX;
+    }
+
+    std::vector<std::pair<std::string, StreamEntry>> result_entries;
+
+    {
+        std::lock_guard<std::mutex> lock(streams_mutex);
+        auto it = streams.find(stream_key);
+        if (it == streams.end()) {
+            return "*0\r\n";
+        }
+        const Stream& stream = it->second;
+
+        for (const auto& [entry_id, entry_kv] : stream) {
+            uint64_t entry_ms, entry_seq;
+            if (!parse_range_id(entry_id, entry_ms, entry_seq)) continue;
+
+            if (id_less_equal(start_ms, start_seq, entry_ms, entry_seq) &&
+                id_less_equal(entry_ms, entry_seq, end_ms, end_seq)) {
+                result_entries.push_back({entry_id, entry_kv});
+            }
+            
+            if (!id_less_equal(entry_ms, entry_seq, end_ms, end_seq)) {
+                break;
+            }
+        }
+    }
+
+    return encode_xrange_response(result_entries);
 }
