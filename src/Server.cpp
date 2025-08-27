@@ -57,6 +57,8 @@ static std::string dispatch(const std::string& cmd, int fd) {
         return handle_TYPE(cmd.c_str());
     } else if (op == "xadd") {
         return handle_XADD(cmd.c_str());
+    } else if(op == "xrange") {
+        return handle_XRANGE(cmd.c_str());
     } else {
         return "-ERR Invalid Unknown Command\r\n";
     }
@@ -193,5 +195,6 @@ int main() {
 
     for (auto &pfd : poll_fds) close(pfd.fd);
     close(server_fd);
+    
     return 0;
 }
