@@ -311,7 +311,6 @@ std::string handle_TYPE(const char* resp) {
     return "+none\r\n";
 }
 
-
 std::string handle_XADD(const char* resp) {
     auto parts = parse_resp_array(resp);
     if (parts.size() < 4) return "-ERR Invalid XADD Command\r\n";
@@ -326,14 +325,10 @@ std::string handle_XADD(const char* resp) {
     uint64_t ms_part = 0;
     uint64_t seq_part = 0;
     bool seq_wildcard = false;
-    bool time_wildcard = false;
+    bool full_wildcard = false;
 
-    if (!parse_entry_id(entry_id, ms_part, seq_part, seq_wildcard)) {
+    if (!parse_entry_id(entry_id, ms_part, seq_part, seq_wildcard, full_wildcard)) {
         return "-ERR Invalid entry ID format\r\n";
-    }
-
-    if (ms_part == UINT64_MAX) {
-        time_wildcard = true;
     }
 
     std::string new_entry_id;
@@ -342,58 +337,52 @@ std::string handle_XADD(const char* resp) {
         std::lock_guard<std::mutex> lock(streams_mutex);
         auto& stream = streams[stream_key];
 
-        if (time_wildcard) {
+        if (full_wildcard) {
             uint64_t now_ms = current_unix_time_ms();
 
             uint64_t last_seq_for_ms = 0;
-            bool found_ms = false;
-
+            bool found = false;
             for (auto it = stream.rbegin(); it != stream.rend(); ++it) {
                 uint64_t entry_ms, entry_seq;
-                bool dummy_wildcard;
-                if (!parse_entry_id(it->first, entry_ms, entry_seq, dummy_wildcard)) continue;
+                bool dummy_sw, dummy_fw;
+                if (!parse_entry_id(it->first, entry_ms, entry_seq, dummy_sw, dummy_fw)) continue;
                 if (entry_ms == now_ms) {
                     last_seq_for_ms = entry_seq;
-                    found_ms = true;
+                    found = true;
                     break;
                 }
                 if (entry_ms < now_ms) break;
             }
-
-            seq_part = found_ms ? last_seq_for_ms + 1 : 0;
+            seq_part = found ? last_seq_for_ms + 1 : 0;
             ms_part = now_ms;
             new_entry_id = std::to_string(ms_part) + "-" + std::to_string(seq_part);
-
         } else if (seq_wildcard) {
             uint64_t last_seq_for_ms = 0;
-            bool found_ms = false;
-
+            bool found = false;
             for (auto it = stream.rbegin(); it != stream.rend(); ++it) {
                 uint64_t entry_ms, entry_seq;
-                bool dummy_wildcard;
-                if (!parse_entry_id(it->first, entry_ms, entry_seq, dummy_wildcard)) continue;
+                bool dummy_sw, dummy_fw;
+                if (!parse_entry_id(it->first, entry_ms, entry_seq, dummy_sw, dummy_fw)) continue;
                 if (entry_ms == ms_part) {
                     last_seq_for_ms = entry_seq;
-                    found_ms = true;
+                    found = true;
                     break;
                 }
                 if (entry_ms < ms_part) break;
             }
-
-            if (!found_ms) {
-                seq_part = ms_part == 0 ? 1 : 0;
+            if (!found) {
+                seq_part = (ms_part == 0) ? 1 : 0;
             } else {
                 seq_part = last_seq_for_ms + 1;
             }
             new_entry_id = std::to_string(ms_part) + "-" + std::to_string(seq_part);
-
         } else {
             new_entry_id = entry_id;
         }
 
         uint64_t new_ms, new_seq;
-        bool dummy_wildcard;
-        if (!parse_entry_id(new_entry_id, new_ms, new_seq, dummy_wildcard))
+        bool dummy_sw, dummy_fw;
+        if (!parse_entry_id(new_entry_id, new_ms, new_seq, dummy_sw, dummy_fw))
             return "-ERR Invalid entry ID format\r\n";
 
         if (new_ms == 0 && new_seq == 0)
@@ -402,7 +391,7 @@ std::string handle_XADD(const char* resp) {
         if (!stream.empty()) {
             const std::string& last_id = stream.back().first;
             uint64_t last_ms, last_seq;
-            if (!parse_entry_id(last_id, last_ms, last_seq, dummy_wildcard)) {
+            if (!parse_entry_id(last_id, last_ms, last_seq, dummy_sw, dummy_fw)) {
                 last_ms = 0; last_seq = 0;
             }
             if (!is_id_greater(new_ms, new_seq, last_ms, last_seq))
@@ -413,7 +402,6 @@ std::string handle_XADD(const char* resp) {
         for (size_t i = 3; i < parts.size(); i += 2) {
             entry[parts[i]] = parts[i + 1];
         }
-
         stream.emplace_back(new_entry_id, std::move(entry));
     }
 

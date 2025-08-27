@@ -1,24 +1,26 @@
 #include "StreamIDVerifier.hpp"
 
-bool parse_entry_id(const std::string& id, uint64_t& ms_time, uint64_t& seq_num, bool& seq_wildcard) {
-    static std::regex id_regex(R"(^(\d+|[*])-(\*|\d+)$)");
-    std::smatch match;
+bool parse_entry_id(const std::string& id, uint64_t& ms_time, uint64_t& seq_num, bool& seq_wildcard, bool& full_wildcard) {
+    static std::regex id_regex(R"(^(\d+)-(\*|\d+)$)");
     seq_wildcard = false;
+    full_wildcard = false;
+
+    if (id == "*") {
+        full_wildcard = true;
+        ms_time = seq_num = UINT64_MAX; // mark full wildcard internally
+        return true;
+    }
+
+    std::smatch match;
     if (!std::regex_match(id, match, id_regex)) return false;
 
     try {
-        if (match[1] == "*") {
-            // Full wildcard (time part)
-            ms_time = UINT64_MAX;
-        } else {
-            ms_time = std::stoull(match[1]);
-        }
-
+        ms_time = std::stoull(match[1].str());
         if (match[2] == "*") {
             seq_wildcard = true;
             seq_num = UINT64_MAX;
         } else {
-            seq_num = std::stoull(match[2]);
+            seq_num = std::stoull(match[2].str());
         }
     } catch (...) {
         return false;
