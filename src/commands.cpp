@@ -90,23 +90,29 @@ std::string handle_RPUSH(const char* resp) {
     if (to_lower(parts[0]) != "rpush") return "-ERR Invalid RPUSH Command\r\n";
     const std::string listName = parts[1];
 
+    int addedCount = static_cast<int>(parts.size()) - 2;
+
+    std::unique_lock<std::mutex> lk(storage_mutex);
+    auto& lst = lists[listName];
+
     // Push items
-    {
-        std::lock_guard<std::mutex> lk(storage_mutex);
-        auto& lst = lists[listName];
-        for (size_t i = 2; i < parts.size(); ++i) lst.push_back(parts[i]);
+    for (size_t i = 2; i < parts.size(); ++i) {
+        lst.push_back(parts[i]);
     }
 
-    // Unblock waiting clients (if any)
+    // Calculate the size BEFORE unblocking (what RPUSH should return)
+    int size_before_unblock = static_cast<int>(lst.size());
+
+    // Unblock waiting clients if any
     {
-        std::scoped_lock lk(storage_mutex, blocked_mutex); // consistent multi-lock
+        std::scoped_lock multi_lock(storage_mutex, blocked_mutex);
         auto it = blocked_clients.find(listName);
-        while (it != blocked_clients.end() && !it->second.empty() && !lists[listName].empty()) {
+        while (it != blocked_clients.end() && !it->second.empty() && !lst.empty()) {
             int client = it->second.front();
             it->second.pop();
 
-            std::string popped = lists[listName].front();
-            lists[listName].erase(lists[listName].begin());
+            std::string popped = lst.front();
+            lst.erase(lst.begin());
 
             std::string response = "*2\r\n";
             response += "$" + std::to_string(listName.size()) + "\r\n" + listName + "\r\n";
@@ -116,19 +122,12 @@ std::string handle_RPUSH(const char* resp) {
             blocked_fds.erase(client);
             client_blocked_on_list.erase(client);
         }
-        if (it != blocked_clients.end() && it->second.empty()) {
-            // optional cleanup
-            // blocked_clients.erase(it); // keep queues to avoid reallocation churn
-        }
     }
 
-    int size_after = 0;
-    {
-        std::lock_guard<std::mutex> lk(storage_mutex);
-        size_after = static_cast<int>(lists[listName].size());
-    }
-    return ":" + std::to_string(size_after) + "\r\n";
+    // Return the size_before_unblock (not after popping for blocked clients)
+    return ":" + std::to_string(size_before_unblock) + "\r\n";
 }
+
 
 // --- LPOP ---
 std::string handle_LPOP(const char* resp) {
