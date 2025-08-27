@@ -393,7 +393,7 @@ std::string handle_XADD(const char* resp) {
                 last_ms = 0; last_seq = 0;
             }
             if (!is_id_greater(new_ms, new_seq, last_ms, last_seq)) {
-                return "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
+                return "-ERR The ID specified in XADD must be greater than 0-0\r\n";
             }
             if (new_ms == 0 && new_seq == 0) {
                 return "-ERR The ID specified in XADD must be greater than 0-0\r\n";
