@@ -450,53 +450,72 @@ std::string handle_XREAD(const char* resp) {
     auto parts = parse_resp_array(resp);
     if (parts.size() < 4) return "-ERR Invalid XREAD Command\r\n";
     if (to_lower(parts[0]) != "xread") return "-ERR Invalid XREAD Command\r\n";
-    if (to_lower(parts[1]) != "streams") return "-ERR Missing STREAMS keyword\r\n";
 
-    size_t total_args = parts.size();
-    size_t num_streams = (total_args - 2) / 2;
-    if ((total_args - 2) % 2 != 0 || num_streams == 0)
-        return "-ERR Syntax error\r\n";
+    auto it_streams = std::find(parts.begin(), parts.end(), "streams");
+    if (it_streams == parts.end()) return "-ERR Missing STREAMS keyword\r\n";
 
-    std::vector<std::string> stream_keys(parts.begin() + 2, parts.begin() + 2 + num_streams);
-    std::vector<std::string> last_ids(parts.begin() + 2 + num_streams, parts.end());
+    size_t streams_pos = std::distance(parts.begin(), it_streams);
 
-    std::lock_guard<std::mutex> lock(streams_mutex);
-    std::string response = "*" + std::to_string(num_streams) + "\r\n";
+    size_t total_args_after_streams = parts.size() - (streams_pos + 1);
+    if (total_args_after_streams % 2 != 0) return "-ERR Mismatched keys and IDs count\r\n";
+
+    size_t num_streams = total_args_after_streams / 2;
+
+    std::vector<std::string> keys(parts.begin() + streams_pos + 1, parts.begin() + streams_pos + 1 + num_streams);
+    std::vector<std::string> ids(parts.begin() + streams_pos + 1 + num_streams, parts.end());
+
+    std::vector<std::pair<std::string, std::vector<std::pair<std::string, StreamEntry>>>> result;
+
+    std::lock_guard lock(streams_mutex);
 
     for (size_t i = 0; i < num_streams; ++i) {
-        const std::string& key = stream_keys[i];
-        const std::string& last_id = last_ids[i];
-
+        auto& key = keys[i];
+        auto& id = ids[i];
         uint64_t last_ms, last_seq;
-        bool dummy1, dummy2;
-        if (!parse_entry_id(last_id, last_ms, last_seq, dummy1, dummy2)) {
-            return "-ERR Invalid entry ID\r\n";
+        if (!parse_range_id(id, last_ms, last_seq)) {
+            return "-ERR Invalid stream ID format\r\n";
         }
 
-        auto it = streams.find(key);
-        std::vector<std::pair<std::string, StreamEntry>> filtered_entries;
-        if (it != streams.end()) {
-            for (const auto& [entry_id, kvs] : it->second) {
-                uint64_t entry_ms, entry_seq;
-                if (!parse_entry_id(entry_id, entry_ms, entry_seq, dummy1, dummy2)) continue;
-                if (is_id_greater(entry_ms, entry_seq, last_ms, last_seq)) {
-                    filtered_entries.emplace_back(entry_id, kvs);
-                }
+        auto sit = streams.find(key);
+        if (sit == streams.end()) {
+            result.emplace_back(key, std::vector<std::pair<std::string, StreamEntry>>{});
+            continue;
+        }
+
+        const Stream& stream = sit->second;
+        std::vector<std::pair<std::string, StreamEntry>> entries;
+
+        for (const auto& [entry_id, entry_kv] : stream) {
+            uint64_t entry_ms, entry_seq;
+            if (!parse_range_id(entry_id, entry_ms, entry_seq)) continue;
+
+            if ((entry_ms > last_ms) || (entry_ms == last_ms && entry_seq > last_seq)) {
+                entries.push_back({entry_id, entry_kv});
             }
         }
 
-        response += "*2\r\n";
-        response += resp_bulk_string(key);
+        result.emplace_back(key, std::move(entries));
+    }
 
-        std::string encoded_entries = encode_xrange_response(filtered_entries);
+    std::string resp_out = "*" + std::to_string(result.size()) + "\r\n";
+    for (const auto& [key, entries] : result) {
+        resp_out += "*2\r\n";                  
+        resp_out += resp_bulk_string(key);
 
-        size_t pos = encoded_entries.find("\r\n");
-        if (pos == std::string::npos) {
-            response += encoded_entries;
-        } else {
-            response += encoded_entries.substr(pos + 2);
+        resp_out += "*" + std::to_string(entries.size()) + "\r\n"; 
+        for (const auto& [entry_id, kvs] : entries) {
+            resp_out += "*2\r\n"; 
+            resp_out += resp_bulk_string(entry_id);
+
+            std::vector<std::string> kv_list;
+            for (const auto& [k, v] : kvs) {
+                kv_list.push_back(k);
+                kv_list.push_back(v);
+            }
+
+            resp_out += resp_array(kv_list);
         }
     }
 
-    return response;
+    return resp_out;
 }
