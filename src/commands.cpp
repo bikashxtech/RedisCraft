@@ -445,3 +445,58 @@ std::string handle_XRANGE(const char* resp) {
 
     return encode_xrange_response(result_entries);
 }
+
+std::string handle_XREAD(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() < 4) return "-ERR Invalid XREAD Command\r\n";
+    if (to_lower(parts[0]) != "xread") return "-ERR Invalid XREAD Command\r\n";
+    if (to_lower(parts[1]) != "streams") return "-ERR Missing STREAMS keyword\r\n";
+
+    size_t total_args = parts.size();
+    size_t num_streams = (total_args - 2) / 2;
+    if ((total_args - 2) % 2 != 0 || num_streams == 0)
+        return "-ERR Syntax error\r\n";
+
+    std::vector<std::string> stream_keys(parts.begin() + 2, parts.begin() + 2 + num_streams);
+    std::vector<std::string> last_ids(parts.begin() + 2 + num_streams, parts.end());
+
+    std::lock_guard<std::mutex> lock(streams_mutex);
+    std::string response = "*" + std::to_string(num_streams) + "\r\n";
+
+    for (size_t i = 0; i < num_streams; ++i) {
+        const std::string& key = stream_keys[i];
+        const std::string& last_id = last_ids[i];
+
+        uint64_t last_ms, last_seq;
+        bool dummy1, dummy2;
+        if (!parse_entry_id(last_id, last_ms, last_seq, dummy1, dummy2)) {
+            return "-ERR Invalid entry ID\r\n";
+        }
+
+        auto it = streams.find(key);
+        std::vector<std::pair<std::string, StreamEntry>> filtered_entries;
+        if (it != streams.end()) {
+            for (const auto& [entry_id, kvs] : it->second) {
+                uint64_t entry_ms, entry_seq;
+                if (!parse_entry_id(entry_id, entry_ms, entry_seq, dummy1, dummy2)) continue;
+                if (is_id_greater(entry_ms, entry_seq, last_ms, last_seq)) {
+                    filtered_entries.emplace_back(entry_id, kvs);
+                }
+            }
+        }
+
+        response += "*2\r\n";
+        response += resp_bulk_string(key);
+
+        std::string encoded_entries = encode_xrange_response(filtered_entries);
+
+        size_t pos = encoded_entries.find("\r\n");
+        if (pos == std::string::npos) {
+            response += encoded_entries;
+        } else {
+            response += encoded_entries.substr(pos + 2);
+        }
+    }
+
+    return response;
+}

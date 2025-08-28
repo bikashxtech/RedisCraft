@@ -59,6 +59,8 @@ static std::string dispatch(const std::string& cmd, int fd) {
         return handle_XADD(cmd.c_str());
     } else if(op == "xrange") {
         return handle_XRANGE(cmd.c_str());
+    } else if(op == "xread") {
+        return handle_XREAD(cmd.c_str());
     } else {
         return "-ERR Invalid Unknown Command\r\n";
     }
@@ -103,7 +105,6 @@ void blpop_timeout_monitor() {
                 blocked_fds.erase(fd);
             }
 
-            // Send null bulk string response for timeout
             std::string response = "$-1\r\n";
             send_response(fd, response);
         }
@@ -152,23 +153,19 @@ int main() {
             break;
         }
 
-        // New connections
         if (poll_fds[0].revents & POLLIN) {
             sockaddr_in client_addr{};
             socklen_t client_len = sizeof(client_addr);
             int client_fd = accept(server_fd, (sockaddr*)&client_addr, &client_len);
             if (client_fd >= 0) {
                 std::cout << "New client connected: FD " << client_fd << std::endl;
-                poll_fds.push_back({ client_fd, POLLIN, 0 }); // <-- ADD to poll list
+                poll_fds.push_back({ client_fd, POLLIN, 0 }); 
             }
         }
 
-        // Existing clients
         for (size_t i = 1; i < poll_fds.size();) {
             int fd = poll_fds[i].fd;
-        
-            // Now always try to read from client if poll says data available,
-            // even if client was previously blocked and now unblocked.
+
             if (poll_fds[i].revents & POLLIN) {
                 char buffer[4096];
                 ssize_t n = recv(fd, buffer, sizeof(buffer) - 1, 0);
