@@ -15,8 +15,8 @@ std::string handle_XADD(const char* resp);
 std::string handle_XRANGE(const char* resp);
 std::string handle_XREAD(const char* resp, int fd = -1);
 std::string handle_INCR(const char* resp);
-std::string handle_MULTI(const char* resp); 
-std::string handle_EXEC(const char* resp);
+std::string handle_MULTI(const char* resp, int client_fd); 
+std::string handle_EXEC(const char* resp, int client_fd);
 
 // Util for safe send
 bool send_response(int fd, const std::string& response);

@@ -47,9 +47,9 @@ static std::string dispatch(const std::string& cmd, int fd) {
     } else if (op == "incr") {
         return handle_INCR(cmd.c_str());
     } else if (op == "multi") {
-        return handle_MULTI(cmd.c_str());
+        return handle_MULTI(cmd.c_str(), fd);
     } else if (op == "exec") {
-        return handle_EXEC(cmd.c_str());
+        return handle_EXEC(cmd.c_str(), fd);
     }  else if (op == "rpush") {
         return handle_RPUSH(cmd.c_str());
     } else if (op == "lpush") {
@@ -226,6 +226,7 @@ int main() {
                     close(fd);
                     remove_blocked_client_fd(fd);
                     remove_blocked_stream_client_fd(fd);
+                    remove_client_transaction(fd);;
                     poll_fds.erase(poll_fds.begin() + i);
                     continue;
                 }

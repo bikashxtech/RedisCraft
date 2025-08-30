@@ -34,6 +34,14 @@ struct StreamBlockedClient {
     TimePoint expiry;
 };
 
+struct TransactionState {
+    bool in_transaction;
+    std::vector<std::string> queued_commands;
+};
+
+extern std::unordered_map<int, TransactionState> client_transactions;
+extern std::mutex transaction_mutex;
+
 extern std::unordered_map<std::string, std::vector<StreamBlockedClient>> blocked_stream_clients;
 extern std::unordered_set<int> blocked_stream_fds;
 
@@ -60,3 +68,5 @@ void expiry_monitor();
 // Helper to remove a disconnected fd from blocked queues
 void remove_blocked_client_fd(int fd);
 void remove_blocked_stream_client_fd(int fd);
+
+void remove_client_transaction(int fd);

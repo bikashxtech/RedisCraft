@@ -104,22 +104,48 @@ std::string handle_INCR(const char* resp) {
     return ":" + std::to_string(value) + "\r\n";
 }
 
-std::string handle_MULTI(const char* resp) {
+std::string handle_MULTI(const char* resp, int client_fd) {
     auto parts = parse_resp_array(resp);
     if (parts.size() != 1) return "-ERR wrong number of arguments for 'multi' command\r\n";
     if (to_lower(parts[0]) != "multi") return "-ERR Invalid MULTI Command\r\n";
 
-    // For now, just return OK. We'll implement transaction queuing in later stages.
+    {
+        std::lock_guard<std::mutex> lock(transaction_mutex);
+        client_transactions[client_fd] = {true, {}};
+    }
+
     return "+OK\r\n";
 }
 
-std::string handle_EXEC(const char* resp) {
+std::string handle_EXEC(const char* resp, int client_fd) {
     auto parts = parse_resp_array(resp);
     if (parts.size() != 1) return "-ERR wrong number of arguments for 'exec' command\r\n";
     if (to_lower(parts[0]) != "exec") return "-ERR Invalid EXEC Command\r\n";
 
-    // For now, just return error since we haven't implemented transaction queuing yet
-    return "-ERR EXEC without MULTI\r\n";
+    TransactionState transaction;
+    bool has_transaction = false;
+
+    {
+        std::lock_guard<std::mutex> lock(transaction_mutex);
+        auto it = client_transactions.find(client_fd);
+        if (it != client_transactions.end()) {
+            transaction = it->second;
+            has_transaction = true;
+            client_transactions.erase(it); // End the transaction
+        }
+    }
+
+    if (!has_transaction) {
+        return "-ERR EXEC without MULTI\r\n";
+    }
+
+    // For empty transaction, return empty array
+    if (transaction.queued_commands.empty()) {
+        return "*0\r\n";
+    }
+
+    // For now, just return empty array. We'll implement command execution in later stages.
+    return "*0\r\n";
 }
 
 // --- LPUSH ---

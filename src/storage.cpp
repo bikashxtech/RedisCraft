@@ -18,6 +18,9 @@ std::mutex streams_mutex;
 std::unordered_map<std::string, std::vector<StreamBlockedClient>> blocked_stream_clients;
 std::unordered_set<int> blocked_stream_fds;
 
+std::unordered_map<int, TransactionState> client_transactions;
+std::mutex transaction_mutex;
+
 std::mutex storage_mutex;
 std::mutex blocked_mutex;
 
@@ -72,4 +75,9 @@ void remove_blocked_stream_client_fd(int fd) {
     }
     
     blocked_stream_fds.erase(fd);
+}
+
+void remove_client_transaction(int fd) {
+    std::lock_guard<std::mutex> lock(transaction_mutex);
+    client_transactions.erase(fd);
 }
