@@ -104,6 +104,15 @@ std::string handle_INCR(const char* resp) {
     return ":" + std::to_string(value) + "\r\n";
 }
 
+std::string handle_MULTI(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() != 1) return "-ERR wrong number of arguments for 'multi' command\r\n";
+    if (to_lower(parts[0]) != "multi") return "-ERR Invalid MULTI Command\r\n";
+
+    // For now, just return OK. We'll implement transaction queuing in later stages.
+    return "+OK\r\n";
+}
+
 // --- LPUSH ---
 std::string handle_LPUSH(const char* resp) {
     auto parts = parse_resp_array(resp);
