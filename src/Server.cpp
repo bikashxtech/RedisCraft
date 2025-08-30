@@ -105,7 +105,7 @@ void blpop_timeout_monitor() {
                 blocked_fds.erase(fd);
             }
 
-            std::string response = "$-1\r\n";
+            std::string response = "*-1\r\n";
             send_response(fd, response);
         }
     }
