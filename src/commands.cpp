@@ -113,6 +113,15 @@ std::string handle_MULTI(const char* resp) {
     return "+OK\r\n";
 }
 
+std::string handle_EXEC(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() != 1) return "-ERR wrong number of arguments for 'exec' command\r\n";
+    if (to_lower(parts[0]) != "exec") return "-ERR Invalid EXEC Command\r\n";
+
+    // For now, just return error since we haven't implemented transaction queuing yet
+    return "-ERR EXEC without MULTI\r\n";
+}
+
 // --- LPUSH ---
 std::string handle_LPUSH(const char* resp) {
     auto parts = parse_resp_array(resp);

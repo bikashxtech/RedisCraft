@@ -23,6 +23,7 @@ static std::string dispatch(const std::string& cmd, int fd) {
         if (cmd.find("PING") != std::string::npos) return "+PONG\r\n";
         if (cmd.find("INCR") != std::string::npos) return "-ERR Use RESP format for INCR\r\n";
         if (cmd.find("MULTI") != std::string::npos) return "+OK\r\n";
+        if (cmd.find("EXEC") != std::string::npos) return "-ERR EXEC without MULTI\r\n";
         return "-ERR unknown command\r\n";
     }
 
@@ -47,7 +48,9 @@ static std::string dispatch(const std::string& cmd, int fd) {
         return handle_INCR(cmd.c_str());
     } else if (op == "multi") {
         return handle_MULTI(cmd.c_str());
-    } else if (op == "rpush") {
+    } else if (op == "exec") {
+        return handle_EXEC(cmd.c_str());
+    }  else if (op == "rpush") {
         return handle_RPUSH(cmd.c_str());
     } else if (op == "lpush") {
         return handle_LPUSH(cmd.c_str());
