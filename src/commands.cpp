@@ -332,6 +332,7 @@ std::string handle_XADD(const char* resp) {
     }
 
     std::string new_entry_id;
+    StreamEntry new_entry;
 
     {
         std::lock_guard<std::mutex> lock(streams_mutex);
@@ -398,13 +399,59 @@ std::string handle_XADD(const char* resp) {
                 return "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n";
         }
 
-        StreamEntry entry;
         for (size_t i = 3; i < parts.size(); i += 2) {
-            entry[parts[i]] = parts[i + 1];
+            new_entry[parts[i]] = parts[i + 1];
         }
-        stream.emplace_back(new_entry_id, std::move(entry));
+        stream.emplace_back(new_entry_id, new_entry);
     }
 
+    std::vector<int> clients_to_unblock;
+    {
+        std::scoped_lock lk(blocked_mutex, streams_mutex);
+        auto it = blocked_stream_clients.find(stream_key);
+        if (it != blocked_stream_clients.end()) {
+            auto& clients = it->second;
+            for (auto client_it = clients.begin(); client_it != clients.end();) {
+                if (Clock::now() > client_it->expiry) {
+                    blocked_stream_fds.erase(client_it->fd);
+                    client_it = clients.erase(client_it);
+                    continue;
+                }
+                
+                uint64_t client_ms, client_seq;
+                if (parse_range_id(client_it->last_id, client_ms, client_seq)) {
+                    uint64_t new_ms, new_seq;
+                    bool dummy_sw, dummy_fw;
+                    if (parse_entry_id(new_entry_id, new_ms, new_seq, dummy_sw, dummy_fw)) {
+                        if (is_id_greater(new_ms, new_seq, client_ms, client_seq)) {
+                            clients_to_unblock.push_back(client_it->fd);
+                            blocked_stream_fds.erase(client_it->fd);
+                            client_it = clients.erase(client_it);
+                            continue;
+                        }
+                    }
+                }
+                ++client_it;
+            }
+        }
+    }
+    
+    for (int fd : clients_to_unblock) {
+        std::string response = "*1\r\n*2\r\n";
+        response += resp_bulk_string(stream_key);
+        response += "*1\r\n*2\r\n";
+        response += resp_bulk_string(new_entry_id);
+        
+        std::vector<std::string> kv_list;
+        for (const auto& [k, v] : new_entry) {
+            kv_list.push_back(k);
+            kv_list.push_back(v);
+        }
+        response += resp_array(kv_list);
+        
+        send_response(fd, response);
+    }
+    
     return "$" + std::to_string(new_entry_id.size()) + "\r\n" + new_entry_id + "\r\n";
 }
 
@@ -446,63 +493,16 @@ std::string handle_XRANGE(const char* resp) {
     return encode_xrange_response(result_entries);
 }
 
-std::string handle_XREAD(const char* resp) {
-    auto parts = parse_resp_array(resp);
-    if (parts.size() < 4) return "-ERR Invalid XREAD Command\r\n";
-    if (to_lower(parts[0]) != "xread") return "-ERR Invalid XREAD Command\r\n";
-
-    auto it_streams = std::find(parts.begin(), parts.end(), "streams");
-    if (it_streams == parts.end()) return "-ERR Missing STREAMS keyword\r\n";
-
-    size_t streams_pos = std::distance(parts.begin(), it_streams);
-
-    size_t total_args_after_streams = parts.size() - (streams_pos + 1);
-    if (total_args_after_streams % 2 != 0) return "-ERR Mismatched keys and IDs count\r\n";
-
-    size_t num_streams = total_args_after_streams / 2;
-
-    std::vector<std::string> keys(parts.begin() + streams_pos + 1, parts.begin() + streams_pos + 1 + num_streams);
-    std::vector<std::string> ids(parts.begin() + streams_pos + 1 + num_streams, parts.end());
-
-    std::vector<std::pair<std::string, std::vector<std::pair<std::string, StreamEntry>>>> result;
-
-    std::lock_guard lock(streams_mutex);
-
-    for (size_t i = 0; i < num_streams; ++i) {
-        auto& key = keys[i];
-        auto& id = ids[i];
-        uint64_t last_ms, last_seq;
-        if (!parse_range_id(id, last_ms, last_seq)) {
-            return "-ERR Invalid stream ID format\r\n";
-        }
-
-        auto sit = streams.find(key);
-        if (sit == streams.end()) {
-            result.emplace_back(key, std::vector<std::pair<std::string, StreamEntry>>{});
-            continue;
-        }
-
-        const Stream& stream = sit->second;
-        std::vector<std::pair<std::string, StreamEntry>> entries;
-
-        for (const auto& [entry_id, entry_kv] : stream) {
-            uint64_t entry_ms, entry_seq;
-            if (!parse_range_id(entry_id, entry_ms, entry_seq)) continue;
-
-            if ((entry_ms > last_ms) || (entry_ms == last_ms && entry_seq > last_seq)) {
-                entries.push_back({entry_id, entry_kv});
-            }
-        }
-
-        result.emplace_back(key, std::move(entries));
-    }
-
+// Helper function to format XREAD response
+std::string format_xread_response(const std::vector<std::pair<std::string, std::vector<std::pair<std::string, StreamEntry>>>>& result) {
     std::string resp_out = "*" + std::to_string(result.size()) + "\r\n";
     for (const auto& [key, entries] : result) {
+        if (entries.empty()) continue; // Skip empty streams
+        
         resp_out += "*2\r\n";                  
         resp_out += resp_bulk_string(key);
-
         resp_out += "*" + std::to_string(entries.size()) + "\r\n"; 
+        
         for (const auto& [entry_id, kvs] : entries) {
             resp_out += "*2\r\n"; 
             resp_out += resp_bulk_string(entry_id);
@@ -512,10 +512,114 @@ std::string handle_XREAD(const char* resp) {
                 kv_list.push_back(k);
                 kv_list.push_back(v);
             }
-
             resp_out += resp_array(kv_list);
         }
     }
-
+    
+    // If no data found, return null array
+    if (resp_out == "*0\r\n") {
+        return "*-1\r\n";
+    }
+    
     return resp_out;
+}
+
+std::string handle_XREAD(const char* resp, int client_fd) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() < 4) return "-ERR Invalid XREAD Command\r\n";
+    if (to_lower(parts[0]) != "xread") return "-ERR Invalid XREAD Command\r\n";
+
+    // Check for BLOCK option
+    bool block = false;
+    int64_t block_timeout_ms = 0;
+    size_t block_pos = 1;
+    
+    if (to_lower(parts[1]) == "block" && parts.size() >= 5) {
+        block = true;
+        try {
+            block_timeout_ms = std::stoll(parts[2]);
+            if (block_timeout_ms < 0) return "-ERR Invalid block timeout\r\n";
+        } catch (...) {
+            return "-ERR Invalid block timeout\r\n";
+        }
+        block_pos = 3;
+    }
+
+    auto it_streams = std::find(parts.begin() + block_pos, parts.end(), "streams");
+    if (it_streams == parts.end()) return "-ERR Missing STREAMS keyword\r\n";
+
+    size_t streams_pos = std::distance(parts.begin(), it_streams);
+    size_t total_args_after_streams = parts.size() - (streams_pos + 1);
+    if (total_args_after_streams % 2 != 0) return "-ERR Mismatched keys and IDs count\r\n";
+
+    size_t num_streams = total_args_after_streams / 2;
+    std::vector<std::string> keys(parts.begin() + streams_pos + 1, parts.begin() + streams_pos + 1 + num_streams);
+    std::vector<std::string> ids(parts.begin() + streams_pos + 1 + num_streams, parts.end());
+
+    // Check if we have data available immediately
+    std::vector<std::pair<std::string, std::vector<std::pair<std::string, StreamEntry>>>> result;
+    bool has_data = false;
+
+    {
+        std::lock_guard lock(streams_mutex);
+        for (size_t i = 0; i < num_streams; ++i) {
+            auto& key = keys[i];
+            auto& id = ids[i];
+            uint64_t last_ms, last_seq;
+            if (!parse_range_id(id, last_ms, last_seq)) {
+                return "-ERR Invalid stream ID format\r\n";
+            }
+
+            auto sit = streams.find(key);
+            if (sit == streams.end()) {
+                result.emplace_back(key, std::vector<std::pair<std::string, StreamEntry>>{});
+                continue;
+            }
+
+            const Stream& stream = sit->second;
+            std::vector<std::pair<std::string, StreamEntry>> entries;
+
+            for (const auto& [entry_id, entry_kv] : stream) {
+                uint64_t entry_ms, entry_seq;
+                if (!parse_range_id(entry_id, entry_ms, entry_seq)) continue;
+
+                if ((entry_ms > last_ms) || (entry_ms == last_ms && entry_seq > last_seq)) {
+                    entries.push_back({entry_id, entry_kv});
+                }
+            }
+
+            if (!entries.empty()) {
+                has_data = true;
+            }
+            result.emplace_back(key, std::move(entries));
+        }
+    }
+
+    // If data is available or not blocking, return immediately
+    if (has_data || !block) {
+        return format_xread_response(result);
+    }
+
+    // No data available and blocking requested
+    if (block_timeout_ms == 0) {
+        // Block indefinitely (not implemented for simplicity)
+        return "*-1\r\n";
+    }
+
+    // Block with timeout - store the blocking request
+    TimePoint expiry = Clock::now() + std::chrono::milliseconds(block_timeout_ms);
+    
+    {
+        std::scoped_lock lk(blocked_mutex, streams_mutex);
+        // Store blocking info for each stream
+        for (size_t i = 0; i < num_streams; ++i) {
+            const std::string& key = keys[i];
+            const std::string& last_id = ids[i];
+            
+            blocked_stream_clients[key].push_back({client_fd, last_id, expiry});
+        }
+        blocked_stream_fds.insert(client_fd);
+    }
+
+    return "";
 }

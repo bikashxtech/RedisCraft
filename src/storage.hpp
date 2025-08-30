@@ -27,6 +27,16 @@ struct BlockedClientInfo {
     TimePoint expiry;
 };
 
+// Add to storage.hpp
+struct StreamBlockedClient {
+    int fd;
+    std::string last_id;
+    TimePoint expiry;
+};
+
+extern std::unordered_map<std::string, std::vector<StreamBlockedClient>> blocked_stream_clients;
+extern std::unordered_set<int> blocked_stream_fds;
+
 // Global state
 extern std::unordered_map<int, BlockedClientInfo> blocked_clients_info;
 extern std::unordered_map<std::string, ValueWithExpiry> redis_storage;

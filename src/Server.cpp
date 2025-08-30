@@ -60,7 +60,7 @@ static std::string dispatch(const std::string& cmd, int fd) {
     } else if(op == "xrange") {
         return handle_XRANGE(cmd.c_str());
     } else if(op == "xread") {
-        return handle_XREAD(cmd.c_str());
+        return handle_XREAD(cmd.c_str(), fd); // Pass fd for blocking
     } else {
         return "-ERR Invalid Unknown Command\r\n";
     }
@@ -111,9 +111,39 @@ void blpop_timeout_monitor() {
     }
 }
 
+void stream_block_timeout_monitor() {
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        TimePoint now = Clock::now();
+
+        std::vector<int> timed_out_clients;
+
+        {
+            std::scoped_lock lk(blocked_mutex, streams_mutex);
+            for (auto& [stream_key, clients] : blocked_stream_clients) {
+                for (auto it = clients.begin(); it != clients.end();) {
+                    if (it->expiry <= now) {
+                        timed_out_clients.push_back(it->fd);
+                        blocked_stream_fds.erase(it->fd);
+                        it = clients.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+        }
+
+        for (int fd : timed_out_clients) {
+            std::string response = "*-1\r\n"; // Null response for timeout
+            send_response(fd, response);
+        }
+    }
+}
+
 int main() {
     std::thread(expiry_monitor).detach();
     std::thread(blpop_timeout_monitor).detach();
+    std::thread(stream_block_timeout_monitor).detach(); 
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 
@@ -165,6 +195,14 @@ int main() {
 
         for (size_t i = 1; i < poll_fds.size();) {
             int fd = poll_fds[i].fd;
+
+            {
+                std::lock_guard<std::mutex> lk(blocked_mutex);
+                if (blocked_stream_fds.find(fd) != blocked_stream_fds.end()) {
+                    ++i;
+                    continue;
+                }
+            }
 
             if (poll_fds[i].revents & POLLIN) {
                 char buffer[4096];

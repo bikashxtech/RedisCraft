@@ -15,6 +15,9 @@ std::unordered_set<int> blocked_fds;
 std::unordered_map<std::string, Stream> streams;
 std::mutex streams_mutex;
 
+std::unordered_map<std::string, std::vector<StreamBlockedClient>> blocked_stream_clients;
+std::unordered_set<int> blocked_stream_fds;
+
 std::mutex storage_mutex;
 std::mutex blocked_mutex;
 
