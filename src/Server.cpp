@@ -122,6 +122,11 @@ void stream_block_timeout_monitor() {
             std::scoped_lock lk(blocked_mutex, streams_mutex);
             for (auto& [stream_key, clients] : blocked_stream_clients) {
                 for (auto it = clients.begin(); it != clients.end();) {
+                    if (it->expiry == TimePoint::max()) {
+                        ++it;
+                        continue;
+                    }
+                    
                     if (it->expiry <= now) {
                         timed_out_clients.push_back(it->fd);
                         blocked_stream_fds.erase(it->fd);
@@ -134,7 +139,7 @@ void stream_block_timeout_monitor() {
         }
 
         for (int fd : timed_out_clients) {
-            std::string response = "*-1\r\n"; // Null response for timeout
+            std::string response = "*-1\r\n";
             send_response(fd, response);
         }
     }
@@ -211,6 +216,7 @@ int main() {
                     std::cout << "Client disconnected: FD " << fd << std::endl;
                     close(fd);
                     remove_blocked_client_fd(fd);
+                    remove_blocked_stream_client_fd(fd);
                     poll_fds.erase(poll_fds.begin() + i);
                     continue;
                 }

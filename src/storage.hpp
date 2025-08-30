@@ -59,3 +59,4 @@ void expiry_monitor();
 
 // Helper to remove a disconnected fd from blocked queues
 void remove_blocked_client_fd(int fd);
+void remove_blocked_stream_client_fd(int fd);

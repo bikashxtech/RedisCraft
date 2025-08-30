@@ -595,31 +595,37 @@ std::string handle_XREAD(const char* resp, int client_fd) {
         }
     }
 
-    // If data is available or not blocking, return immediately
-    if (has_data || !block) {
+    // If data is available, return immediately
+    if (has_data) {
         return format_xread_response(result);
     }
 
     // No data available and blocking requested
-    if (block_timeout_ms == 0) {
-        // Block indefinitely (not implemented for simplicity)
-        return "*-1\r\n";
-    }
-
-    // Block with timeout - store the blocking request
-    TimePoint expiry = Clock::now() + std::chrono::milliseconds(block_timeout_ms);
-    
-    {
-        std::scoped_lock lk(blocked_mutex, streams_mutex);
-        // Store blocking info for each stream
-        for (size_t i = 0; i < num_streams; ++i) {
-            const std::string& key = keys[i];
-            const std::string& last_id = ids[i];
-            
-            blocked_stream_clients[key].push_back({client_fd, last_id, expiry});
+    if (block) {
+        TimePoint expiry;
+        
+        if (block_timeout_ms == 0) {
+            // Block indefinitely (no timeout)
+            expiry = TimePoint::max();
+        } else {
+            // Block with timeout
+            expiry = Clock::now() + std::chrono::milliseconds(block_timeout_ms);
         }
-        blocked_stream_fds.insert(client_fd);
+        
+        {
+            std::scoped_lock lk(blocked_mutex, streams_mutex);
+            // Store blocking info for each stream
+            for (size_t i = 0; i < num_streams; ++i) {
+                const std::string& key = keys[i];
+                const std::string& last_id = ids[i];
+                
+                blocked_stream_clients[key].push_back({client_fd, last_id, expiry});
+            }
+            blocked_stream_fds.insert(client_fd);
+        }
+
+        return ""; // Empty response indicates client is blocked
     }
 
-    return "";
+    return "*-1\r\n";
 }

@@ -57,3 +57,19 @@ void remove_blocked_client_fd(int fd) {
     }
     blocked_fds.erase(fd);
 }
+
+void remove_blocked_stream_client_fd(int fd) {
+    std::scoped_lock lk(blocked_mutex, streams_mutex);
+    
+    for (auto& [stream_key, clients] : blocked_stream_clients) {
+        for (auto it = clients.begin(); it != clients.end();) {
+            if (it->fd == fd) {
+                it = clients.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    
+    blocked_stream_fds.erase(fd);
+}
