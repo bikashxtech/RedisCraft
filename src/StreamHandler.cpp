@@ -67,6 +67,12 @@ bool parse_range_id(const std::string& id, uint64_t& ms_time, uint64_t& seq_num)
         seq_num = UINT64_MAX;
         return true;
     }
+    if (id == "$") {
+        // Special case: $ means "latest entry" - we'll handle this in the calling code
+        ms_time = UINT64_MAX - 1; // Special marker value
+        seq_num = UINT64_MAX - 1;
+        return true;
+    }
     static std::regex re(R"(^(\d+)(?:-(\d+))?$)");
     std::smatch match;
     if (!std::regex_match(id, match, re)) return false;

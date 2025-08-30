@@ -495,6 +495,19 @@ std::string handle_XRANGE(const char* resp) {
 
 // Helper function to format XREAD response
 std::string format_xread_response(const std::vector<std::pair<std::string, std::vector<std::pair<std::string, StreamEntry>>>>& result) {
+    // Check if we have any entries at all
+    bool has_any_entries = false;
+    for (const auto& [key, entries] : result) {
+        if (!entries.empty()) {
+            has_any_entries = true;
+            break;
+        }
+    }
+    
+    if (!has_any_entries) {
+        return "*-1\r\n";
+    }
+    
     std::string resp_out = "*" + std::to_string(result.size()) + "\r\n";
     for (const auto& [key, entries] : result) {
         if (entries.empty()) continue; // Skip empty streams
@@ -514,11 +527,6 @@ std::string format_xread_response(const std::vector<std::pair<std::string, std::
             }
             resp_out += resp_array(kv_list);
         }
-    }
-    
-    // If no data found, return null array
-    if (resp_out == "*0\r\n") {
-        return "*-1\r\n";
     }
     
     return resp_out;
@@ -579,6 +587,14 @@ std::string handle_XREAD(const char* resp, int client_fd) {
             const Stream& stream = sit->second;
             std::vector<std::pair<std::string, StreamEntry>> entries;
 
+            // Handle $ special case - only return entries newer than the current last entry
+            if (last_ms == UINT64_MAX - 1 && last_seq == UINT64_MAX - 1) {
+                // $ means we should only return entries added after this command
+                // So we return nothing for immediate check, but will block for new entries
+                result.emplace_back(key, std::vector<std::pair<std::string, StreamEntry>>{});
+                continue;
+            }
+
             for (const auto& [entry_id, entry_kv] : stream) {
                 uint64_t entry_ms, entry_seq;
                 if (!parse_range_id(entry_id, entry_ms, entry_seq)) continue;
@@ -619,7 +635,19 @@ std::string handle_XREAD(const char* resp, int client_fd) {
                 const std::string& key = keys[i];
                 const std::string& last_id = ids[i];
                 
-                blocked_stream_clients[key].push_back({client_fd, last_id, expiry});
+                // For $, we need to find the current last ID in the stream
+                std::string actual_last_id = last_id;
+                if (last_id == "$") {
+                    auto sit = streams.find(key);
+                    if (sit != streams.end() && !sit->second.empty()) {
+                        actual_last_id = sit->second.back().first;
+                    } else {
+                        // If stream is empty, use "0-0" as the base
+                        actual_last_id = "0-0";
+                    }
+                }
+                
+                blocked_stream_clients[key].push_back({client_fd, actual_last_id, expiry});
             }
             blocked_stream_fds.insert(client_fd);
         }
@@ -627,5 +655,6 @@ std::string handle_XREAD(const char* resp, int client_fd) {
         return ""; // Empty response indicates client is blocked
     }
 
+    // No data and not blocking - return null array
     return "*-1\r\n";
 }
