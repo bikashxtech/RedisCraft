@@ -21,6 +21,7 @@ static std::string dispatch(const std::string& cmd, int fd) {
     // Fast-path for inline PING/ECHO when resp parsing is not used
     if (!cmd.empty() && cmd[0] != '*') {
         if (cmd.find("PING") != std::string::npos) return "+PONG\r\n";
+        if (cmd.find("INCR") != std::string::npos) return "-ERR Use RESP format for INCR\r\n";
         return "-ERR unknown command\r\n";
     }
 
@@ -41,6 +42,8 @@ static std::string dispatch(const std::string& cmd, int fd) {
         return handle_set(cmd.c_str());
     } else if (op == "get") {
         return handle_get(cmd.c_str());
+    } else if (op == "incr") {
+        return handle_INCR(cmd.c_str());
     } else if (op == "rpush") {
         return handle_RPUSH(cmd.c_str());
     } else if (op == "lpush") {

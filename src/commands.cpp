@@ -70,6 +70,40 @@ std::string handle_get(const char* resp) {
     return "$" + std::to_string(v.value.size()) + "\r\n" + v.value + "\r\n";
 }
 
+std::string handle_INCR(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() != 2) return "-ERR wrong number of arguments for 'incr' command\r\n";
+    if (to_lower(parts[0]) != "incr") return "-ERR Invalid INCR Command\r\n";
+
+    std::string key = parts[1];
+    int64_t value = 0;
+    bool key_exists = false;
+
+    {
+        std::lock_guard<std::mutex> lock(storage_mutex);
+        auto it = redis_storage.find(key);
+        
+        if (it != redis_storage.end()) {
+            key_exists = true;
+            // Check if value is numeric
+            const std::string& str_val = it->second.value;
+            try {
+                value = std::stoll(str_val);
+            } catch (...) {
+                return "-ERR value is not an integer or out of range\r\n";
+            }
+        }
+        
+        // Increment the value
+        value++;
+        
+        // Store the new value
+        redis_storage[key] = {std::to_string(value), TimePoint::min()};
+    }
+
+    return ":" + std::to_string(value) + "\r\n";
+}
+
 // --- LPUSH ---
 std::string handle_LPUSH(const char* resp) {
     auto parts = parse_resp_array(resp);
