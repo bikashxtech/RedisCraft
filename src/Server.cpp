@@ -18,7 +18,6 @@
 #include <netdb.h>
 
 static std::string dispatch(const std::string& cmd, int fd) {
-    // Fast-path for inline PING/ECHO when resp parsing is not used
     if (!cmd.empty() && cmd[0] != '*') {
         if (cmd.find("PING") != std::string::npos) return "+PONG\r\n";
         if (cmd.find("INCR") != std::string::npos) return "-ERR Use RESP format for INCR\r\n";
@@ -27,7 +26,25 @@ static std::string dispatch(const std::string& cmd, int fd) {
         return "-ERR unknown command\r\n";
     }
 
-    // RESP array
+    {
+        std::lock_guard<std::mutex> lock(transaction_mutex);
+        auto it = client_transactions.find(fd);
+        if (it != client_transactions.end() && it->second.in_transaction) {
+         
+            if (cmd.find("MULTI") != std::string::npos) {
+                return "-ERR MULTI calls can not be nested\r\n";
+            }
+            
+            auto parts = parse_resp_array(cmd.c_str());
+            if (parts.empty()) return "-ERR Protocol error\r\n";
+            std::string op = to_lower(parts[0]);
+            
+            if (op != "exec" && op != "discard") {
+                it->second.queued_commands.push_back(cmd);
+                return "+QUEUED\r\n";
+            }
+        }
+    }
     auto parts = parse_resp_array(cmd.c_str());
     if (parts.empty()) return "-ERR Protocol error\r\n";
     std::string op = to_lower(parts[0]);
@@ -35,8 +52,6 @@ static std::string dispatch(const std::string& cmd, int fd) {
     if (op == "ping") {
         return "+PONG\r\n";
     } else if (op == "echo") {
-        // Format: *2\r\n$4\r\nECHO\r\n$<n>\r\n<data>\r\n
-        // Just echo argument back as bulk
         if (parts.size() != 2) return "-ERR wrong number of arguments for 'echo'\r\n";
         const auto& message = parts[1];
         return "$" + std::to_string(message.size()) + "\r\n" + message + "\r\n";
@@ -50,7 +65,7 @@ static std::string dispatch(const std::string& cmd, int fd) {
         return handle_MULTI(cmd.c_str(), fd);
     } else if (op == "exec") {
         return handle_EXEC(cmd.c_str(), fd);
-    }  else if (op == "rpush") {
+    } else if (op == "rpush") {
         return handle_RPUSH(cmd.c_str());
     } else if (op == "lpush") {
         return handle_LPUSH(cmd.c_str());
@@ -61,7 +76,7 @@ static std::string dispatch(const std::string& cmd, int fd) {
     } else if (op == "llen") {
         return handle_LLEN(cmd.c_str());
     } else if (op == "blpop") {
-        return handle_BLPOP(cmd.c_str(), fd); // may be empty string to indicate "blocked"
+        return handle_BLPOP(cmd.c_str(), fd); 
     } else if (op == "type") {
         return handle_TYPE(cmd.c_str());
     } else if (op == "xadd") {
@@ -69,7 +84,7 @@ static std::string dispatch(const std::string& cmd, int fd) {
     } else if(op == "xrange") {
         return handle_XRANGE(cmd.c_str());
     } else if(op == "xread") {
-        return handle_XREAD(cmd.c_str(), fd); // Pass fd for blocking
+        return handle_XREAD(cmd.c_str(), fd); 
     } else {
         return "-ERR Invalid Unknown Command\r\n";
     }

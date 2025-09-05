@@ -8,7 +8,6 @@
 #include <unistd.h>
 #include <iostream>
 
-// --- Internal helpers ---
 static bool is_expired(const ValueWithExpiry& v) {
     return v.expiry != TimePoint::min() && Clock::now() >= v.expiry;
 }
@@ -18,7 +17,6 @@ bool send_response(int fd, const std::string& response) {
     return n == static_cast<ssize_t>(response.size());
 }
 
-// --- SET ---
 std::string handle_set(const char* resp) {
     auto parts = parse_resp_array(resp);
     if (parts.size() < 3) return "-ERR Invalid SET Command\r\n";
@@ -47,7 +45,6 @@ std::string handle_set(const char* resp) {
     return "+OK\r\n";
 }
 
-// --- GET ---
 std::string handle_get(const char* resp) {
     auto parts = parse_resp_array(resp);
     if (parts.size() != 2) return "-ERR Invalid GET command\r\n";
@@ -94,10 +91,8 @@ std::string handle_INCR(const char* resp) {
             }
         }
         
-        // Increment the value
         value++;
         
-        // Store the new value
         redis_storage[key] = {std::to_string(value), TimePoint::min()};
     }
 
@@ -131,7 +126,7 @@ std::string handle_EXEC(const char* resp, int client_fd) {
         if (it != client_transactions.end()) {
             transaction = it->second;
             has_transaction = true;
-            client_transactions.erase(it); // End the transaction
+            client_transactions.erase(it); 
         }
     }
 
@@ -139,16 +134,63 @@ std::string handle_EXEC(const char* resp, int client_fd) {
         return "-ERR EXEC without MULTI\r\n";
     }
 
-    // For empty transaction, return empty array
     if (transaction.queued_commands.empty()) {
         return "*0\r\n";
     }
 
-    // For now, just return empty array. We'll implement command execution in later stages.
-    return "*0\r\n";
+    std::vector<std::string> responses;
+    for (const auto& cmd : transaction.queued_commands) {
+        std::string response;
+        auto parts = parse_resp_array(cmd.c_str());
+        if (parts.empty()) return "-ERR Protocol error\r\n";
+        std::string op = to_lower(parts[0]);
+
+        if (op == "ping") {
+            response =  "+PONG\r\n";
+        } else if (op == "echo") {
+            if (parts.size() != 2) return "-ERR wrong number of arguments for 'echo'\r\n";
+            const auto& message = parts[1];
+            response = "$" + std::to_string(message.size()) + "\r\n" + message + "\r\n";
+        } else if (op == "set") {
+            response = handle_set(cmd.c_str());
+        } else if (op == "get") {
+            response = handle_get(cmd.c_str());
+        } else if (op == "incr") {
+            response = handle_INCR(cmd.c_str());
+        } else if (op == "rpush") {
+            response = handle_RPUSH(cmd.c_str());
+        } else if (op == "lpush") {
+            response = handle_LPUSH(cmd.c_str());
+        } else if (op == "lpop") {
+            response = handle_LPOP(cmd.c_str());
+        } else if (op == "lrange") {
+            response = handle_LRANGE(cmd.c_str());
+        } else if (op == "llen") {
+            response = handle_LLEN(cmd.c_str());
+        } else if (op == "blpop") {
+            response = handle_BLPOP(cmd.c_str(), client_fd); 
+        } else if (op == "type") {
+            response = handle_TYPE(cmd.c_str());
+        } else if (op == "xadd") {
+            response = handle_XADD(cmd.c_str());
+        } else if(op == "xrange") {
+            response = handle_XRANGE(cmd.c_str());
+        } else if(op == "xread") {
+            response = handle_XREAD(cmd.c_str(), client_fd); 
+        } else {
+            response = "-ERR Invalid Unknown Command\r\n";
+        }
+        responses.push_back(response);
+    }
+
+    std::string result = "*" + std::to_string(responses.size()) + "\r\n";
+    for (const auto& response : responses) {
+        result += response;
+    }
+    
+    return result;
 }
 
-// --- LPUSH ---
 std::string handle_LPUSH(const char* resp) {
     auto parts = parse_resp_array(resp);
     if (parts.size() < 3) return "-ERR Invalid LPUSH Command\r\n";
@@ -163,7 +205,6 @@ std::string handle_LPUSH(const char* resp) {
     return ":" + std::to_string(lst.size()) + "\r\n";
 }
 
-// --- RPUSH ---
 std::string handle_RPUSH(const char* resp) {
     auto parts = parse_resp_array(resp);
     if (parts.size() < 3) return "-ERR Invalid RPUSH Command\r\n";
@@ -642,7 +683,6 @@ std::string handle_XREAD(const char* resp, int client_fd) {
     std::vector<std::string> keys(parts.begin() + streams_pos + 1, parts.begin() + streams_pos + 1 + num_streams);
     std::vector<std::string> ids(parts.begin() + streams_pos + 1 + num_streams, parts.end());
 
-    // Check if we have data available immediately
     std::vector<std::pair<std::string, std::vector<std::pair<std::string, StreamEntry>>>> result;
     bool has_data = false;
 
@@ -665,10 +705,7 @@ std::string handle_XREAD(const char* resp, int client_fd) {
             const Stream& stream = sit->second;
             std::vector<std::pair<std::string, StreamEntry>> entries;
 
-            // Handle $ special case - only return entries newer than the current last entry
             if (last_ms == UINT64_MAX - 1 && last_seq == UINT64_MAX - 1) {
-                // $ means we should only return entries added after this command
-                // So we return nothing for immediate check, but will block for new entries
                 result.emplace_back(key, std::vector<std::pair<std::string, StreamEntry>>{});
                 continue;
             }
@@ -689,38 +726,31 @@ std::string handle_XREAD(const char* resp, int client_fd) {
         }
     }
 
-    // If data is available, return immediately
     if (has_data) {
         return format_xread_response(result);
     }
 
-    // No data available and blocking requested
     if (block) {
         TimePoint expiry;
         
         if (block_timeout_ms == 0) {
-            // Block indefinitely (no timeout)
             expiry = TimePoint::max();
         } else {
-            // Block with timeout
             expiry = Clock::now() + std::chrono::milliseconds(block_timeout_ms);
         }
         
         {
             std::scoped_lock lk(blocked_mutex, streams_mutex);
-            // Store blocking info for each stream
             for (size_t i = 0; i < num_streams; ++i) {
                 const std::string& key = keys[i];
                 const std::string& last_id = ids[i];
                 
-                // For $, we need to find the current last ID in the stream
                 std::string actual_last_id = last_id;
                 if (last_id == "$") {
                     auto sit = streams.find(key);
                     if (sit != streams.end() && !sit->second.empty()) {
                         actual_last_id = sit->second.back().first;
                     } else {
-                        // If stream is empty, use "0-0" as the base
                         actual_last_id = "0-0";
                     }
                 }
@@ -730,9 +760,7 @@ std::string handle_XREAD(const char* resp, int client_fd) {
             blocked_stream_fds.insert(client_fd);
         }
 
-        return ""; // Empty response indicates client is blocked
+        return "";
     }
-
-    // No data and not blocking - return null array
     return "*-1\r\n";
 }

@@ -27,7 +27,6 @@ struct BlockedClientInfo {
     TimePoint expiry;
 };
 
-// Add to storage.hpp
 struct StreamBlockedClient {
     int fd;
     std::string last_id;
@@ -37,6 +36,10 @@ struct StreamBlockedClient {
 struct TransactionState {
     bool in_transaction;
     std::vector<std::string> queued_commands;
+    
+    TransactionState() : in_transaction(false) {}
+    TransactionState(bool in_tx, const std::vector<std::string>& cmds) 
+        : in_transaction(in_tx), queued_commands(cmds) {}
 };
 
 extern std::unordered_map<int, TransactionState> client_transactions;
@@ -45,7 +48,6 @@ extern std::mutex transaction_mutex;
 extern std::unordered_map<std::string, std::vector<StreamBlockedClient>> blocked_stream_clients;
 extern std::unordered_set<int> blocked_stream_fds;
 
-// Global state
 extern std::unordered_map<int, BlockedClientInfo> blocked_clients_info;
 extern std::unordered_map<std::string, ValueWithExpiry> redis_storage;
 extern std::unordered_map<std::string, std::vector<std::string>> lists;
@@ -54,18 +56,16 @@ extern std::unordered_map<int, std::string> pending_responses;
 extern std::mutex pending_responses_mutex;
 
 
-extern std::unordered_map<std::string, std::queue<int>> blocked_clients; // list -> queued fds
-extern std::unordered_map<int, std::string> client_blocked_on_list;      // fd -> list
+extern std::unordered_map<std::string, std::queue<int>> blocked_clients; 
+extern std::unordered_map<int, std::string> client_blocked_on_list;      
 extern std::unordered_set<int> blocked_fds;
 
 extern std::mutex storage_mutex;
 extern std::mutex blocked_mutex;
 
-// Expiry helpers
 void cleanup_expired_keys();
 void expiry_monitor();
 
-// Helper to remove a disconnected fd from blocked queues
 void remove_blocked_client_fd(int fd);
 void remove_blocked_stream_client_fd(int fd);
 
