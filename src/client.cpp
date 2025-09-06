@@ -2,8 +2,8 @@
 #include <string>
 #include <vector>
 #include <cstring>
-#include <thread>
-#include <chrono>
+#include <algorithm>
+#include <sstream>
 
 #include <unistd.h>
 #include <sys/types.h>
@@ -17,320 +17,442 @@ private:
     int sockfd;
     std::string host;
     int port;
-
+    
+    bool connected;
+    
+public:
+    RedisClient(const std::string& host = "127.0.0.1", int port = 6379) 
+        : host(host), port(port), connected(false), sockfd(-1) {}
+    
+    ~RedisClient() {
+        disconnect();
+    }
+    
     bool connect() {
         sockfd = socket(AF_INET, SOCK_STREAM, 0);
         if (sockfd < 0) {
-            std::cerr << "Failed to create socket" << std::endl;
+            std::cerr << "Error creating socket" << std::endl;
             return false;
         }
-
-        sockaddr_in server_addr{};
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_port = htons(port);
         
-        if (inet_pton(AF_INET, host.c_str(), &server_addr.sin_addr) <= 0) {
+        struct sockaddr_in serv_addr;
+        serv_addr.sin_family = AF_INET;
+        serv_addr.sin_port = htons(port);
+        
+        if (inet_pton(AF_INET, host.c_str(), &serv_addr.sin_addr) <= 0) {
             std::cerr << "Invalid address/Address not supported" << std::endl;
             return false;
         }
-
-        if (::connect(sockfd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        
+        if (::connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
             std::cerr << "Connection failed" << std::endl;
             return false;
         }
-
+        
+        connected = true;
         return true;
     }
-
-public:
-
-    std::string send_command(const std::string& command) {
-        if (send(sockfd, command.c_str(), command.size(), 0) < 0) {
-            return "-ERR Send failed";
-        }
-
-        char buffer[4096];
-        ssize_t n = recv(sockfd, buffer, sizeof(buffer) - 1, 0);
-        if (n <= 0) {
-            return "-ERR Receive failed";
-        }
-        buffer[n] = '\0';
-        return std::string(buffer, n);
-    }
-    RedisClient(const std::string& h = "127.0.0.1", int p = 6379) : host(h), port(p), sockfd(-1) {}
-
-    ~RedisClient() {
-        if (sockfd >= 0) {
+    
+    void disconnect() {
+        if (connected) {
             close(sockfd);
+            connected = false;
+            sockfd = -1;
         }
     }
-
-    bool initialize() {
-        return connect();
+    
+    bool isConnected() const {
+        return connected;
     }
-
-    // Helper to create RESP array commands
-    std::string create_resp_command(const std::vector<std::string>& parts) {
-        std::string command = "*" + std::to_string(parts.size()) + "\r\n";
-        for (const auto& part : parts) {
-            command += "$" + std::to_string(part.size()) + "\r\n" + part + "\r\n";
+    
+    std::string sendCommand(const std::string& command) {
+        if (!connected) {
+            return "Not connected to server";
         }
-        return command;
-    }
-
-    // Basic commands
-    std::string ping() {
-        return send_command(create_resp_command({"PING"}));
-    }
-
-    std::string echo(const std::string& message) {
-        return send_command(create_resp_command({"ECHO", message}));
-    }
-
-    std::string set(const std::string& key, const std::string& value) {
-        return send_command(create_resp_command({"SET", key, value}));
-    }
-
-    std::string get(const std::string& key) {
-        return send_command(create_resp_command({"GET", key}));
-    }
-
-    std::string incr(const std::string& key) {
-        return send_command(create_resp_command({"INCR", key}));
-    }
-
-    // List commands
-    std::string lpush(const std::string& key, const std::vector<std::string>& values) {
-        std::vector<std::string> parts = {"LPUSH", key};
-        parts.insert(parts.end(), values.begin(), values.end());
-        return send_command(create_resp_command(parts));
-    }
-
-    std::string rpush(const std::string& key, const std::vector<std::string>& values) {
-        std::vector<std::string> parts = {"RPUSH", key};
-        parts.insert(parts.end(), values.begin(), values.end());
-        return send_command(create_resp_command(parts));
-    }
-
-    std::string lpop(const std::string& key, int count = 1) {
-        if (count == 1) {
-            return send_command(create_resp_command({"LPOP", key}));
-        } else {
-            return send_command(create_resp_command({"LPOP", key, std::to_string(count)}));
+        
+        
+        ssize_t n = send(sockfd, command.c_str(), command.length(), 0);
+        if (n < 0) {
+            return "Error sending command";
         }
-    }
-
-    std::string lrange(const std::string& key, int start, int end) {
-        return send_command(create_resp_command({"LRANGE", key, std::to_string(start), std::to_string(end)}));
-    }
-
-    std::string llen(const std::string& key) {
-        return send_command(create_resp_command({"LLEN", key}));
-    }
-
-    // Transaction commands
-    std::string multi() {
-        return send_command(create_resp_command({"MULTI"}));
-    }
-
-    std::string exec() {
-        return send_command(create_resp_command({"EXEC"}));
-    }
-
-    std::string discard() {
-        return send_command(create_resp_command({"DISCARD"}));
-    }
-
-    // Type command
-    std::string type(const std::string& key) {
-        return send_command(create_resp_command({"TYPE", key}));
-    }
-
-    // Stream commands (simplified)
-    std::string xadd(const std::string& stream, const std::string& id, 
-                    const std::vector<std::pair<std::string, std::string>>& fields) {
-        std::vector<std::string> parts = {"XADD", stream, id};
-        for (const auto& field : fields) {
-            parts.push_back(field.first);
-            parts.push_back(field.second);
+        
+        
+        std::string response;
+        char buffer[4096];
+        
+        while (true) {
+            n = recv(sockfd, buffer, sizeof(buffer) - 1, 0);
+            if (n <= 0) {
+                break;
+            }
+            
+            buffer[n] = '\0';
+            response += buffer;
+            
+            
+            if (isCompleteResponse(response)) {
+                break;
+            }
         }
-        return send_command(create_resp_command(parts));
+        
+        return response;
     }
-
-    // Simple inline commands for testing
-    std::string inline_ping() {
-        return send_command("PING\r\n");
-    }
-
-    std::string inline_set(const std::string& key, const std::string& value) {
-        return send_command("SET " + key + " " + value + "\r\n");
+    
+private:
+    bool isCompleteResponse(const std::string& response) {
+        if (response.empty()) return false;
+        
+        char firstChar = response[0];
+        
+        switch (firstChar) {
+            case '+': 
+            case '-': 
+            case ':': 
+                
+                return response.find("\r\n") != std::string::npos;
+                
+            case '$': 
+            {
+                
+                size_t crlf_pos = response.find("\r\n");
+                if (crlf_pos == std::string::npos) return false;
+                
+                
+                std::string len_str = response.substr(1, crlf_pos - 1);
+                try {
+                    int length = std::stoi(len_str);
+                    if (length == -1) return true; 
+                    
+                    
+                    size_t expected_size = crlf_pos + 2 + length + 2;
+                    return response.size() >= expected_size;
+                } catch (...) {
+                    return false;
+                }
+            }
+                
+            case '*': 
+            {
+                
+                size_t crlf_pos = response.find("\r\n");
+                if (crlf_pos == std::string::npos) return false;
+                
+                
+                std::string count_str = response.substr(1, crlf_pos - 1);
+                try {
+                    int count = std::stoi(count_str);
+                    if (count == -1) return true; 
+                    if (count == 0) return true;  
+                    
+                    
+                    
+                    
+                    size_t pos = crlf_pos + 2;
+                    for (int i = 0; i < count; i++) {
+                        if (pos >= response.size()) return false;
+                        
+                        char elemType = response[pos];
+                        switch (elemType) {
+                            case '+':
+                            case '-':
+                            case ':':
+                            {
+                                size_t elem_end = response.find("\r\n", pos);
+                                if (elem_end == std::string::npos) return false;
+                                pos = elem_end + 2;
+                                break;
+                            }
+                            case '$':
+                            {
+                                size_t len_end = response.find("\r\n", pos);
+                                if (len_end == std::string::npos) return false;
+                                
+                                std::string len_str = response.substr(pos + 1, len_end - pos - 1);
+                                try {
+                                    int length = std::stoi(len_str);
+                                    if (length == -1) {
+                                        pos = len_end + 2;
+                                    } else {
+                                        size_t data_end = len_end + 2 + length + 2;
+                                        if (response.size() < data_end) return false;
+                                        pos = data_end;
+                                    }
+                                } catch (...) {
+                                    return false;
+                                }
+                                break;
+                            }
+                            case '*':
+                                
+                                
+                                return true;
+                            default:
+                                return false;
+                        }
+                    }
+                    
+                    return pos <= response.size();
+                } catch (...) {
+                    return false;
+                }
+            }
+                
+            default:
+                return false;
+        }
     }
 };
 
-void test_basic_commands(RedisClient& client) {
-    std::cout << "=== Testing Basic Commands ===" << std::endl;
+std::string formatCommand(const std::vector<std::string>& args) {
+    if (args.empty()) return "";
     
-    std::cout << "PING: " << client.ping();
-    std::cout << "ECHO: " << client.echo("Hello World");
-    
-    std::cout << "SET foo bar: " << client.set("foo", "bar");
-    std::cout << "GET foo: " << client.get("foo");
-    
-    std::cout << "SET counter 10: " << client.set("counter", "10");
-    std::cout << "INCR counter: " << client.incr("counter");
-    std::cout << "GET counter: " << client.get("counter");
-    
-    std::cout << "GET nonexistent: " << client.get("nonexistent");
-    std::cout << std::endl;
-}
-
-void test_list_commands(RedisClient& client) {
-    std::cout << "=== Testing List Commands ===" << std::endl;
-    
-    std::cout << "LPUSH mylist a b c: " << client.lpush("mylist", {"a", "b", "c"});
-    std::cout << "LRANGE mylist 0 -1: " << client.lrange("mylist", 0, -1);
-    std::cout << "LLEN mylist: " << client.llen("mylist");
-    
-    std::cout << "RPUSH mylist d e: " << client.rpush("mylist", {"d", "e"});
-    std::cout << "LRANGE mylist 0 -1: " << client.lrange("mylist", 0, -1);
-    
-    std::cout << "LPOP mylist: " << client.lpop("mylist");
-    std::cout << "LRANGE mylist 0 -1: " << client.lrange("mylist", 0, -1);
-    
-    std::cout << "LPOP mylist 2: " << client.lpop("mylist", 2);
-    std::cout << "LRANGE mylist 0 -1: " << client.lrange("mylist", 0, -1);
-    std::cout << std::endl;
-}
-
-void test_transactions(RedisClient& client) {
-    std::cout << "=== Testing Transactions ===" << std::endl;
-    
-    // Test connection 1 - starts transaction
-    RedisClient client1;
-    client1.initialize();
-    
-    std::cout << "Client1 MULTI: " << client1.multi();
-    std::cout << "Client1 SET trans_key initial: " << client1.set("trans_key", "initial");
-    std::cout << "Client1 INCR trans_counter: " << client1.incr("trans_counter");
-    
-    // Test connection 2 - checks that data is not visible during transaction
-    RedisClient client2;
-    client2.initialize();
-    std::cout << "Client2 GET trans_key (should be empty): " << client2.get("trans_key");
-    std::cout << "Client2 GET trans_counter (should be empty): " << client2.get("trans_counter");
-    
-    // Execute transaction
-    std::cout << "Client1 EXEC: " << client1.exec();
-    
-    // Now data should be visible
-    std::cout << "Client2 GET trans_key (after EXEC): " << client2.get("trans_key");
-    std::cout << "Client2 GET trans_counter (after EXEC): " << client2.get("trans_counter");
-    
-    // Test discard
-    std::cout << "Client1 MULTI: " << client1.multi();
-    std::cout << "Client1 SET should_discard value: " << client1.set("should_discard", "value");
-    std::cout << "Client1 DISCARD: " << client1.discard();
-    std::cout << "Client2 GET should_discard (should be empty): " << client2.get("should_discard");
-    
-    std::cout << std::endl;
-}
-
-void test_concurrent_transactions() {
-    std::cout << "=== Testing Concurrent Transactions ===" << std::endl;
-    
-    auto test_client = [](int client_id) {
-        RedisClient client;
-        client.initialize();
-        
-        std::string key = "concurrent_" + std::to_string(client_id);
-        
-        std::cout << "Client " << client_id << " MULTI: " << client.multi();
-        std::cout << "Client " << client_id << " SET " << key << " value: " << client.set(key, "value");
-        std::cout << "Client " << client_id << " EXEC: " << client.exec();
-        std::cout << "Client " << client_id << " GET " << key << ": " << client.get(key);
-    };
-    
-    std::thread t1(test_client, 1);
-    std::thread t2(test_client, 2);
-    std::thread t3(test_client, 3);
-    
-    t1.join();
-    t2.join();
-    t3.join();
-    
-    std::cout << std::endl;
-}
-
-void test_error_cases(RedisClient& client) {
-    std::cout << "=== Testing Error Cases ===" << std::endl;
-    
-    std::cout << "EXEC without MULTI: " << client.exec();
-    std::cout << "DISCARD without MULTI: " << client.discard();
-    
-    std::cout << "MULTI: " << client.multi();
-    std::cout << "Invalid command in transaction: " << client.send_command("INVALID_COMMAND\r\n");
-    std::cout << "EXEC: " << client.exec();
-    
-    std::cout << "TYPE string_key: " << client.type("foo");
-    std::cout << "TYPE list_key: " << client.type("mylist");
-    std::cout << "TYPE nonexistent: " << client.type("nonexistent_key");
-    
-    std::cout << std::endl;
-}
-
-void test_stream_commands(RedisClient& client) {
-    std::cout << "=== Testing Stream Commands ===" << std::endl;
-    
-    std::vector<std::pair<std::string, std::string>> fields = {
-        {"field1", "value1"},
-        {"field2", "value2"}
-    };
-    
-    std::cout << "XADD mystream *: " << client.xadd("mystream", "*", fields);
-    std::cout << "XADD mystream 1000-0: " << client.xadd("mystream", "1000-0", fields);
-    
-    std::cout << "TYPE mystream: " << client.type("mystream");
-    std::cout << std::endl;
-}
-
-void test_performance(RedisClient& client) {
-    std::cout << "=== Testing Performance ===" << std::endl;
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    const int iterations = 1000;
-    for (int i = 0; i < iterations; i++) {
-        client.set("perf_key_" + std::to_string(i), "value_" + std::to_string(i));
+    std::string command = "*" + std::to_string(args.size()) + "\r\n";
+    for (const auto& arg : args) {
+        command += "$" + std::to_string(arg.length()) + "\r\n" + arg + "\r\n";
     }
     
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    
-    std::cout << "Time for " << iterations << " SET operations: " << duration.count() << "ms" << std::endl;
-    std::cout << "Operations per second: " << (iterations * 1000.0 / duration.count()) << std::endl;
-    std::cout << std::endl;
+    return command;
 }
 
-int main() {
-    RedisClient client;
+
+std::vector<std::string> splitCommand(const std::string& input) {
+    std::vector<std::string> tokens;
+    std::istringstream iss(input);
+    std::string token;
+    bool in_quotes = false;
+    char quote_char = '"';
+    std::string current_token;
     
-    if (!client.initialize()) {
-        std::cerr << "Failed to connect to Redis server" << std::endl;
+    for (size_t i = 0; i < input.size(); ++i) {
+        char c = input[i];
+        
+        if (in_quotes) {
+            if (c == quote_char) {
+                if (!current_token.empty()) {
+                    tokens.push_back(current_token);
+                    current_token.clear();
+                }
+                in_quotes = false;
+            } else if (c == '\\' && i + 1 < input.size()) {
+                i++;
+                current_token += input[i];
+            } else {
+                current_token += c;
+            }
+        } else {
+            if (std::isspace(c)) {
+                if (!current_token.empty()) {
+                    tokens.push_back(current_token);
+                    current_token.clear();
+                }
+            } else if (c == '"' || c == '\'') {
+                in_quotes = true;
+                quote_char = c;
+            } else {
+                current_token += c;
+            }
+        }
+    }
+    
+    if (!current_token.empty()) {
+        tokens.push_back(current_token);
+    }
+    
+    return tokens;
+}
+
+void printResponse(const std::string& response) {
+    if (response.empty()) {
+        std::cout << "(empty response)" << std::endl;
+        return;
+    }
+    
+    char firstChar = response[0];
+    
+    switch (firstChar) {
+        case '+': 
+            std::cout << response.substr(1, response.find("\r\n") - 1) << std::endl;
+            break;
+            
+        case '-':
+            std::cout << "Error: " << response.substr(1, response.find("\r\n") - 1) << std::endl;
+            break;
+            
+        case ':':
+            std::cout << "(integer) " << response.substr(1, response.find("\r\n") - 1) << std::endl;
+            break;
+            
+        case '$': 
+        {
+            size_t crlf_pos = response.find("\r\n");
+            if (crlf_pos == std::string::npos) {
+                std::cout << response << std::endl;
+                break;
+            }
+            
+            std::string len_str = response.substr(1, crlf_pos - 1);
+            try {
+                int length = std::stoi(len_str);
+                if (length == -1) {
+                    std::cout << "(nil)" << std::endl;
+                } else {
+                    std::string content = response.substr(crlf_pos + 2, length);
+                    std::cout << "\"" << content << "\"" << std::endl;
+                }
+            } catch (...) {
+                std::cout << response << std::endl;
+            }
+            break;
+        }
+            
+        case '*': 
+        {
+            size_t crlf_pos = response.find("\r\n");
+            if (crlf_pos == std::string::npos) {
+                std::cout << response << std::endl;
+                break;
+            }
+            
+            std::string count_str = response.substr(1, crlf_pos - 1);
+            try {
+                int count = std::stoi(count_str);
+                if (count == -1) {
+                    std::cout << "(nil)" << std::endl;
+                } else if (count == 0) {
+                    std::cout << "(empty list or set)" << std::endl;
+                } else {
+                    size_t pos = crlf_pos + 2;
+                    for (int i = 1; i <= count; i++) {
+                        std::cout << i << ") ";
+                        
+                        if (pos >= response.size()) {
+                            std::cout << "(incomplete response)" << std::endl;
+                            break;
+                        }
+                        
+                        char elemType = response[pos];
+                        switch (elemType) {
+                            case '+':
+                            case '-':
+                            case ':':
+                            {
+                                size_t elem_end = response.find("\r\n", pos);
+                                if (elem_end == std::string::npos) {
+                                    std::cout << response.substr(pos) << std::endl;
+                                    pos = response.size();
+                                } else {
+                                    std::cout << response.substr(pos, elem_end - pos) << std::endl;
+                                    pos = elem_end + 2;
+                                }
+                                break;
+                            }
+                            case '$':
+                            {
+                                size_t len_end = response.find("\r\n", pos);
+                                if (len_end == std::string::npos) {
+                                    std::cout << response.substr(pos) << std::endl;
+                                    pos = response.size();
+                                    break;
+                                }
+                                
+                                std::string len_str = response.substr(pos + 1, len_end - pos - 1);
+                                try {
+                                    int length = std::stoi(len_str);
+                                    if (length == -1) {
+                                        std::cout << "(nil)" << std::endl;
+                                        pos = len_end + 2;
+                                    } else {
+                                        size_t data_start = len_end + 2;
+                                        size_t data_end = data_start + length;
+                                        if (data_end + 2 > response.size()) {
+                                            std::cout << "(incomplete bulk string)" << std::endl;
+                                            pos = response.size();
+                                        } else {
+                                            std::string content = response.substr(data_start, length);
+                                            std::cout << "\"" << content << "\"" << std::endl;
+                                            pos = data_end + 2;
+                                        }
+                                    }
+                                } catch (...) {
+                                    std::cout << response.substr(pos) << std::endl;
+                                    pos = response.size();
+                                }
+                                break;
+                            }
+                            case '*':
+                                std::cout << "(nested array)" << std::endl;
+                                return;
+                            default:
+                                std::cout << response.substr(pos) << std::endl;
+                                pos = response.size();
+                                break;
+                        }
+                    }
+                }
+            } catch (...) {
+                std::cout << response << std::endl;
+            }
+            break;
+        }
+            
+        default:
+            std::cout << response << std::endl;
+            break;
+    }
+}
+
+int main(int argc, char* argv[]) {
+    std::string host = "127.0.0.1";
+    int port = 6379;
+    
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "-h" && i + 1 < argc) {
+            host = argv[++i];
+        } else if (arg == "-p" && i + 1 < argc) {
+            port = std::stoi(argv[++i]);
+        } else {
+            std::cout << "Usage: " << argv[0] << " [-h host] [-p port]" << std::endl;
+            return 1;
+        }
+    }
+    
+    RedisClient client(host, port);
+    
+    std::cout << "Connecting to " << host << ":" << port << "..." << std::endl;
+    if (!client.connect()) {
+        std::cerr << "Failed to connect to server" << std::endl;
         return 1;
     }
     
-    std::cout << "Connected to Redis server successfully!" << std::endl;
+    std::cout << "Connected to server. Type commands or 'quit' to exit." << std::endl;
     
-    // Run tests
-    test_basic_commands(client);
-    test_list_commands(client);
-    test_transactions(client);
-    test_concurrent_transactions();
-    test_error_cases(client);
-    test_stream_commands(client);
-    test_performance(client);
+    std::string input;
+    while (true) {
+        std::cout << host << ":" << port << "> ";
+        std::getline(std::cin, input);
+        
+        if (input.empty()) {
+            continue;
+        }
+        
+        if (input == "quit" || input == "exit") {
+            break;
+        }
+        
+        auto args = splitCommand(input);
+        if (args.empty()) {
+            continue;
+        }
+        
+        std::string command = formatCommand(args);
+        std::string response = client.sendCommand(command);
+        
+        printResponse(response);
+    }
     
-    std::cout << "All tests completed!" << std::endl;
+    client.disconnect();
+    std::cout << "Disconnected from server" << std::endl;
     
     return 0;
 }

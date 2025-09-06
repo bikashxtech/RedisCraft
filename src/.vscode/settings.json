@@ -61,6 +61,8 @@
         "cinttypes": "cpp",
         "typeinfo": "cpp",
         "variant": "cpp",
-        "text_encoding": "cpp"
+        "text_encoding": "cpp",
+        "bitset": "cpp",
+        "regex": "cpp"
     }
 }

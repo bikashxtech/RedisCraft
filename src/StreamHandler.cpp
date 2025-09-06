@@ -7,7 +7,7 @@ bool parse_entry_id(const std::string& id, uint64_t& ms_time, uint64_t& seq_num,
 
     if (id == "*") {
         full_wildcard = true;
-        ms_time = seq_num = UINT64_MAX; // mark full wildcard internally
+        ms_time = seq_num = UINT64_MAX; 
         return true;
     }
 
@@ -34,7 +34,7 @@ bool is_id_greater(uint64_t new_ms, uint64_t new_seq, uint64_t last_ms, uint64_t
     return false;
 }
 
-// Get current unix time in milliseconds
+
 uint64_t current_unix_time_ms() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
@@ -68,8 +68,8 @@ bool parse_range_id(const std::string& id, uint64_t& ms_time, uint64_t& seq_num)
         return true;
     }
     if (id == "$") {
-        // Special case: $ means "latest entry" - we'll handle this in the calling code
-        ms_time = UINT64_MAX - 1; // Special marker value
+        
+        ms_time = UINT64_MAX - 1; 
         seq_num = UINT64_MAX - 1;
         return true;
     }

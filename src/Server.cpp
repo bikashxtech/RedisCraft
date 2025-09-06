@@ -114,7 +114,7 @@ void blpop_timeout_monitor() {
                 if (it_info == blocked_clients_info.end()) continue;
                 list_name = it_info->second.list_name;
 
-                // Remove client from blocked_clients queue
+                
                 auto& q = blocked_clients[list_name];
                 std::queue<int> new_queue;
                 while (!q.empty()) {

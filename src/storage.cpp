@@ -48,7 +48,7 @@ void remove_blocked_client_fd(int fd) {
     auto it = client_blocked_on_list.find(fd);
     if (it != client_blocked_on_list.end()) {
         const std::string list = it->second;
-        // Rebuild the queue without fd
+        
         std::queue<int> rebuilt;
         auto &q = blocked_clients[list];
         while (!q.empty()) {

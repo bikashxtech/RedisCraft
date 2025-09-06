@@ -20,7 +20,7 @@ std::string parse_bulk_string(const char* resp, size_t& pos) {
     if (resp[pos] != '\r' || resp[pos + 1] != '\n') return "";
     pos += 2;
 
-    if (length == -1) return ""; // Null bulk string
+    if (length == -1) return ""; 
 
     std::string result(&resp[pos], static_cast<size_t>(length));
     pos += static_cast<size_t>(length);

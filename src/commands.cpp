@@ -82,7 +82,7 @@ std::string handle_INCR(const char* resp) {
         
         if (it != redis_storage.end()) {
             key_exists = true;
-            // Check if value is numeric
+            
             const std::string& str_val = it->second.value;
             try {
                 value = std::stoll(str_val);
@@ -214,7 +214,7 @@ std::string handle_RPUSH(const char* resp) {
     std::unique_lock<std::mutex> lock(storage_mutex);
     auto& lst = lists[listName];
 
-    // Push items
+    
     for (size_t i = 2; i < parts.size(); ++i) {
         lst.push_back(parts[i]);
     }
@@ -341,7 +341,7 @@ std::string handle_LRANGE(const char* resp) {
     return res;
 }
 
-// --- LLEN ---
+
 std::string handle_LLEN(const char* resp) {
     auto parts = parse_resp_array(resp);
     if (parts.size() != 2) return "-ERR Invalid LLEN Command\r\n";
@@ -353,7 +353,7 @@ std::string handle_LLEN(const char* resp) {
     return ":" + std::to_string(it->second.size()) + "\r\n";
 }
 
-// --- BLPOP (timeout=0 only) ---
+
 std::string handle_BLPOP(const char* resp, int client_fd) {
     auto parts = parse_resp_array(resp);
     if (parts.size() != 3) return "-ERR Invalid BLPOP Arguments\r\n";
@@ -373,7 +373,7 @@ std::string handle_BLPOP(const char* resp, int client_fd) {
         std::lock_guard<std::mutex> lk(storage_mutex);
         auto it = lists.find(list_name);
         if (it != lists.end() && !it->second.empty()) {
-            // List not empty, pop immediately
+            
             std::string popped = it->second.front();
             it->second.erase(it->second.begin());
             std::string resp = "*2\r\n";
@@ -383,9 +383,9 @@ std::string handle_BLPOP(const char* resp, int client_fd) {
         }
     }
 
-    // List empty: block or timeout
+    
     if (timeout_seconds == 0.0) {
-        // Block indefinitely
+        
         std::lock_guard<std::mutex> lk(blocked_mutex);
         blocked_clients[list_name].push(client_fd);
         client_blocked_on_list[client_fd] = list_name;
@@ -393,7 +393,7 @@ std::string handle_BLPOP(const char* resp, int client_fd) {
         return "";
     }
 
-    // Block with timeout
+    
     TimePoint expiry = Clock::now() + std::chrono::milliseconds(static_cast<int>(timeout_seconds * 1000));
     {
         std::scoped_lock lk(blocked_mutex, storage_mutex);
@@ -612,9 +612,9 @@ std::string handle_XRANGE(const char* resp) {
     return encode_xrange_response(result_entries);
 }
 
-// Helper function to format XREAD response
+
 std::string format_xread_response(const std::vector<std::pair<std::string, std::vector<std::pair<std::string, StreamEntry>>>>& result) {
-    // Check if we have any entries at all
+    
     bool has_any_entries = false;
     for (const auto& [key, entries] : result) {
         if (!entries.empty()) {
@@ -629,7 +629,7 @@ std::string format_xread_response(const std::vector<std::pair<std::string, std::
     
     std::string resp_out = "*" + std::to_string(result.size()) + "\r\n";
     for (const auto& [key, entries] : result) {
-        if (entries.empty()) continue; // Skip empty streams
+        if (entries.empty()) continue; 
         
         resp_out += "*2\r\n";                  
         resp_out += resp_bulk_string(key);
@@ -656,7 +656,7 @@ std::string handle_XREAD(const char* resp, int client_fd) {
     if (parts.size() < 4) return "-ERR Invalid XREAD Command\r\n";
     if (to_lower(parts[0]) != "xread") return "-ERR Invalid XREAD Command\r\n";
 
-    // Check for BLOCK option
+    
     bool block = false;
     int64_t block_timeout_ms = 0;
     size_t block_pos = 1;
