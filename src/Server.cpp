@@ -1,6 +1,7 @@
 #include "parser.hpp"
 #include "commands.hpp"
 #include "storage.hpp"
+#include "rdb.hpp"
 
 #include <iostream>
 #include <string>
@@ -85,6 +86,10 @@ static std::string dispatch(const std::string& cmd, int fd) {
         return handle_XRANGE(cmd.c_str());
     } else if(op == "xread") {
         return handle_XREAD(cmd.c_str(), fd); 
+    } else if (op == "save") {
+        return handle_SAVE(cmd.c_str());
+    } else if (op == "bgsave") {
+        return handle_BGSAVE(cmd.c_str());
     } else {
         return "-ERR Invalid Unknown Command\r\n";
     }
@@ -170,9 +175,19 @@ void stream_block_timeout_monitor() {
 }
 
 int main() {
+    if (rdb_enabled) {
+        std::cout << "Loading data from RDB file: " << rdb_filename << std::endl;
+        if (rdb_load(rdb_filename)) {
+            std::cout << "RDB load completed" << std::endl;
+        } else {
+            std::cerr << "RDB load failed or file not found" << std::endl;
+        }
+    }
+
     std::thread(expiry_monitor).detach();
     std::thread(blpop_timeout_monitor).detach();
-    std::thread(stream_block_timeout_monitor).detach(); 
+    std::thread(stream_block_timeout_monitor).detach();
+    std::thread(rdb_background_saver).detach(); 
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 

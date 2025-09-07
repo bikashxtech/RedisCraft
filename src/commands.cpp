@@ -764,3 +764,34 @@ std::string handle_XREAD(const char* resp, int client_fd) {
     }
     return "*-1\r\n";
 }
+
+std::string handle_SAVE(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() != 1) return "-ERR wrong number of arguments for 'save' command\r\n";
+    if (to_lower(parts[0]) != "save") return "-ERR Invalid SAVE Command\r\n";
+    
+    if (rdb_save(rdb_filename)) {
+        return "+OK\r\n";
+    } else {
+        return "-ERR Failed to save RDB file\r\n";
+    }
+}
+
+std::string handle_BGSAVE(const char* resp) {
+    auto parts = parse_resp_array(resp);
+    if (parts.size() != 1) return "-ERR wrong number of arguments for 'bgsave' command\r\n";
+    if (to_lower(parts[0]) != "bgsave") return "-ERR Invalid BGSAVE Command\r\n";
+    
+    // In a real implementation, you'd spawn a separate process for this
+    // For simplicity, we'll just do it in the current thread
+    std::thread([]() {
+        std::cout << "Background saving started by BGSAVE" << std::endl;
+        if (rdb_save(rdb_filename)) {
+            std::cout << "Background saving completed" << std::endl;
+        } else {
+            std::cerr << "Background saving failed" << std::endl;
+        }
+    }).detach();
+    
+    return "+Background saving started\r\n";
+}

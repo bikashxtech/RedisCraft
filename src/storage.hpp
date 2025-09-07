@@ -7,6 +7,8 @@
 #include <mutex>
 #include <chrono>
 #include <queue>
+#include <iostream>
+#include "rdb.hpp"
 
 using Clock = std::chrono::steady_clock;
 using TimePoint = std::chrono::time_point<Clock>;
@@ -70,3 +72,8 @@ void remove_blocked_client_fd(int fd);
 void remove_blocked_stream_client_fd(int fd);
 
 void remove_client_transaction(int fd);
+void rdb_background_saver();
+
+extern std::string rdb_filename;
+extern int rdb_save_interval;
+extern bool rdb_enabled;

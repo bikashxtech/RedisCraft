@@ -81,3 +81,21 @@ void remove_client_transaction(int fd) {
     std::lock_guard<std::mutex> lock(transaction_mutex);
     client_transactions.erase(fd);
 }
+
+std::string rdb_filename = "dump.rdb";
+int rdb_save_interval = 60; 
+bool rdb_enabled = true;
+
+void rdb_background_saver() {
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::seconds(rdb_save_interval));
+        if (rdb_enabled) {
+            std::cout << "Background saving started" << std::endl;
+            if (rdb_save(rdb_filename)) {
+                std::cout << "Background saving completed" << std::endl;
+            } else {
+                std::cerr << "Background saving failed" << std::endl;
+            }
+        }
+    }
+}
