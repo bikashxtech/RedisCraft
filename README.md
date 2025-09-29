@@ -1,17 +1,201 @@
-RedisCraft In-Memory Database Server
 
-A from-scratch implementation of a lightweight, Redis-compatible in-memory database server written in C++. This project is an educational endeavor to deeply understand the internals of distributed systems, concurrent data structures, and network programming by building a core subset of the Redis protocol and functionality.
-✨ Features
+#  RedisCraft 🚀
 
-    Full RESP (Redis Serialization Protocol) Support: Fully compliant client-server communication.
+![Language](https://img.shields.io/badge/Language-C%2B%2B17-blue.svg)
+![Build](https://img.shields.io/badge/Build-CMake%20%7C%20Make-lightgrey.svg)
+![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20WSL2-orange.svg)
+![License](https://img.shields.io/badge/License-MIT-green.svg)
 
-    Rich Data Types:
+**RedisCraft** is a from-scratch implementation of a lightweight, Redis-compatible in-memory database server written in modern C++. This project is an educational endeavor to deeply understand the internals of distributed systems, concurrent data structures, and network programming by building a core subset of the Redis protocol and functionality.
 
-        Strings: Basic GET/SET operations with optional millisecond-level expiry.
+---
 
-        Lists: LPUSH, RPUSH, LPOP, LRANGE, LLEN, and BLPOP operations.
+## ✨ Core Features
 
-        Streams: XADD, XRANGE, and blocking XREAD for time-series data.
+* **⚡ Full RESP Protocol Support**: Fully compliant implementation of the Redis Serialization Protocol (RESP) for robust client-server communication.
+
+* **🗂️ Rich Data Types**:
+    * **Strings**: Basic `GET`/`SET` operations with optional millisecond-level expiry.
+    * **Lists**: `LPUSH`, `RPUSH`, `LPOP`, `LRANGE`, `LLEN`, and blocking `BLPOP` operations.
+    * **Streams**: `XADD`, `XRANGE`, and blocking `XREAD` for handling time-series data.
+
+* **⚙️ Advanced Operations**:
+    * **Transactions**: Atomic execution of command blocks using `MULTI` and `EXEC`.
+    * **Blocking Commands**: Supports `BLPOP` and `XREAD` with timeouts, perfect for building real-time applications.
+    * **Persistence**: RDB-style snapshotting (`SAVE`, `BGSAVE`) for saving and restoring the database state across restarts.
+
+* **🔄 Concurrency**: A thread-safe design using `std::mutex` to handle multiple concurrent clients gracefully.
+
+* **🛠️ Server Management**: Includes `SAVE` and `BGSAVE` commands for flexible persistence management.
+
+---
+
+## 🛠️ Tech Stack
+
+| Component         | Technology                               |
+| ----------------- | ---------------------------------------- |
+| **Language** | C++17                                    |
+| **Networking** | POSIX Sockets, `poll()` for I/O multiplexing |
+| **Concurrency** | `std::thread`, `std::mutex`              |
+| **Persistence** | Custom RDB-like binary format            |
+| **Build System** | CMake / Make                             |
+
+---
+
+## 📦 Getting Started
+
+### Prerequisites
+
+* A Linux/macOS environment (Windows WSL2 should also work).
+* A C++17 compliant compiler like GCC (version 9+) or Clang.
+* `git` and `make`.
+
+### Build Instructions
+
+1.  **Clone the repository:**
+    ```bash
+    git clone [https://github.com/bikashxtech/RedisCraft.git](https://github.com/bikashxtech/RedisCraft.git)
+    cd RedisCraft
+    ```
+
+2.  **Build the project:**
+    ```bash
+    make
+    ```
+    This command compiles the source and generates two binaries in the root directory: `Server` and `client`.
+
+---
+
+## 🚀 Usage
+
+### 1. Starting the Server
+
+Launch the server on the default port (6379):
+```bash
+./Server
+
+The server will load any existing dump.rdb file and begin listening for connections.
+Server Configuration
+You can configure server settings by modifying constants in src/storage.cpp before building:
+ * rdb_filename: Path for the persistence file (default: "dump.rdb").
+ * rdb_save_interval: Interval for automatic background saves in seconds (default: 60).
+2. Using the Built-in Client
+The project includes a CLI client for easy interaction.
+ * Connect to the local server:
+   ./client
+
+ * Connect to a specific host and port:
+   ./client -h 127.0.0.1 -p 6379
+
+Example Session:
+$ ./client
+127.0.0.1:6379> SET mykey "Hello RedisCraft"
++OK
+127.0.0.1:6379> GET mykey
+"Hello RedisCraft"
+127.0.0.1:6379> RPUSH mylist A B C
+:3
+127.0.0.1:6379> LRANGE mylist 0 -1
+1) "A"
+2) "B"
+3) "C"
+127.0.0.1:6379> XADD mystream * field1 value1
+"1691234567890-0"
+127.0.0.1:6379> SAVE
++OK
+127.0.0.1:6379> QUIT
+
+3. Using redis-cli or Other Clients
+Since RedisCraft speaks RESP, you can use standard Redis clients to connect.
+redis-cli -p 6379
+
+127.0.0.1:6379> PING
+PONG
+127.0.0.1:6379> ECHO "Hello from redis-cli"
+"Hello from redis-cli"
+
+📖 Supported Commands
+| Command | Description | Example |
+|---|---|---|
+| PING | Check if the server is alive | PING |
+| ECHO | Echo back the given message | ECHO "Hello" |
+| SET | Set a string value, with optional expiry | SET key value PX 10000 |
+| GET | Get the value of a string key | GET key |
+| INCR | Increment an integer value by one | INCR counter |
+| RPUSH | Append one or more values to a list | RPUSH mylist A B |
+| LPUSH | Prepend one or more values to a list | LPUSH mylist first |
+| LPOP | Remove and return the first element(s) of a list | LPOP mylist 2 |
+| LRANGE | Get a range of elements from a list | LRANGE mylist 0 -1 |
+| LLEN | Get the length of a list | LLEN mylist |
+| BLPOP | Block until an element can be popped from a list | BLPOP mylist 5.0 |
+| XADD | Add a new entry to a stream | XADD mystream * name John |
+| XRANGE | Get a range of entries from a stream | XRANGE mystream - + |
+| XREAD | Read from one or more streams, optionally blocking | XREAD BLOCK 5000 STREAMS mystream 0-0 |
+| MULTI | Start a transaction block | MULTI |
+| EXEC | Execute all commands in a transaction | EXEC |
+| TYPE | Determine the type of a value stored at a key | TYPE mykey |
+| SAVE | Perform a synchronous save to disk | SAVE |
+| BGSAVE | Perform an asynchronous (background) save to disk | BGSAVE |
+🗂️ Project Structure
+.
+├── Server.cpp              # Main server application and event loop
+├── client.cpp              # Command-line client for testing
+├── src/
+│   ├── commands.cpp/.hpp   # Implementation of all Redis commands
+│   ├── parser.cpp/.hpp     # RESP protocol parsing and serialization
+│   ├── storage.cpp/.hpp    # Data storage structures and persistence logic
+│   ├── rdb.cpp/.hpp        # RDB file format encoding/decoding
+│   └── StreamHandler.cpp/.hpp # Stream data type specific logic
+├── .gitignore
+├── CMakeLists.txt
+├── Makefile                # Build configuration
+└── README.md
+
+🧪 Testing Persistence
+The server automatically saves to dump.rdb. You can test this functionality as follows:
+ * Test Basic Persistence (SAVE)
+   # Start server in background
+./Server &
+
+# Set a key and save synchronously
+./client -c "SET persistent_key 'This will survive a restart'"
+./client -c "SAVE"
+
+# Stop the server
+killall Server
+
+# Restart the server and check if the data exists
+./Server &
+./client -c "GET persistent_key" # Should return "This will survive a restart"
+
+ * Test Background Save (BGSAVE)
+   # Run the background save command
+./client -c "BGSAVE"
+
+# Check server logs for "Background saving started" and "Background saving completed"
+
+⚠️ Limitations & Disclaimer
+This is an educational project and is not intended for production use. Please be aware of the following limitations:
+ * Persistence: The RDB implementation is simplified. CRC checksum validation is a placeholder.
+ * Security: No authentication, authorization, or transport-level encryption.
+ * Scalability: Uses a single global lock for data access, which can be a bottleneck under high concurrent load.
+ * Compatibility: Supports a core subset of commands but may not be 100% compatible with all Redis options and edge cases.
+ * Memory Management: No support for data eviction policies like maxmemory.
+Do not use this project to store important or sensitive data.
+🎯 Future Enhancements
+Potential areas for future development and contributions:
+ * [ ] Append-Only File (AOF) persistence for better durability.
+ * [ ] Replication with a leader-follower setup.
+ * [ ] More Data Types: Hashes, Sets, and Sorted Sets.
+ * [ ] Lua Scripting support.
+ * [ ] Improved Concurrency with more granular locking.
+ * [ ] Async I/O (e.g., using epoll or io_uring) for better connection handling.
+🤝 Contributing
+Contributions are welcome! If you have suggestions or want to add features, please feel free to open an issue or submit a pull request.
+👨‍💻 Developer
+ * Bikash Kumar Giri - bikashxtech
+Created as a deep dive into systems programming and the internals of modern databases.
+
 
     Advanced Operations:
 
